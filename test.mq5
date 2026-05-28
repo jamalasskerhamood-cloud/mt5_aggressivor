@@ -1,79 +1,358 @@
-FROM python:3.11-slim-bookworm
+//+------------------------------------------------------------------+
+//|          QuantumShield_BlueProfit_FIXED_V25.mq5                 |
+//|            AGGRESSIVE + PROTECTED + PROFITABLE                  |
+//+------------------------------------------------------------------+
+#property copyright "Proprietary HFT Core"
+#property version   "25.00"
+#property strict
 
-USER root
+#include <Trade/Trade.mqh>
+#include <Trade/PositionInfo.mqh>
 
-ENV DEBIAN_FRONTEND=noninteractive
-ENV DISPLAY=:1
-ENV WINEPREFIX=/root/.wine
-ENV WINEARCH=win64
-ENV WINEDEBUG=-all
+// Position sizing
+input double InpLotSize              = 0.05;
 
-RUN dpkg --add-architecture i386 && apt-get update && apt-get install -y --no-install-recommends \
-    wine wine64 wine32:i386 winbind xvfb fluxbox x11vnc novnc websockify \
-    wget curl procps cabextract unzip dos2unix xdotool \
-    && apt-get clean && rm -rf /var/lib/apt/lists/*
+// Spread protection
+input int    InpMaxSpread            = 5000;
+input int    InpSpreadSamples        = 50;
+input double InpSpreadFactor         = 0.85;
 
-RUN pip install --no-cache-dir mt5linux rpyc
+// Entry velocity - RAISED to filter noise
+input double InpVelocityThreshold    = 0.5;
 
-RUN wget -q https://download.mql5.com/cdn/web/metaquotes.software.corp/mt5/mt5setup.exe \
-    -O /root/mt5setup.exe
+// RISK MANAGEMENT - THE FIX
+input double InpRiskPercent          = 1.0;      // Risk per trade %
+input double InpATRMultiplierSL      = 2.5;      // SL = ATR * multiplier
+input double InpATRMultiplierTP      = 1.5;      // TP = ATR * multiplier (closer TP)
+input int    InpATRPeriod            = 14;
 
-# Copy EA files
-COPY ["OpeningRange_TrendIsolated_EA.ex5", "/root/OpeningRange_TrendIsolated_EA.ex5"]
+// Blue profit - SECOND PROFIT TAKER
+input double InpMinProfitUSD         = 0.05;
 
+// Position limit
+input int    InpMaxPositions         = 2;
 
+// Emergency protection
+input int    InpEmergencySeconds     = 15;
+input double InpEmergencyLoss        = -1.50;
+input double InpDailyLossLimit       = -10.00;   // Stop trading for day
 
-RUN cat > /entrypoint.sh <<EOF
-#!/bin/bash
-set -e
+input ulong  InpMagic                = 909090;
 
-rm -rf /tmp/.X*
+CTrade        trade;
+CPositionInfo pos_info;
 
-Xvfb :1 -screen 0 1280x1024x24 -ac &
-sleep 2
+// Buffers
+double spread_buffer[50];
+int spread_idx = 0;
+int atr_handle;
+double daily_pnl = 0;
+datetime last_day = 0;
 
-fluxbox &
+//====================================================
+// INIT
+//====================================================
+int OnInit()
+{
+   trade.SetExpertMagicNumber(InpMagic);
+   trade.SetDeviationInPoints(200);
+   
+   // Initialize ATR
+   atr_handle = iATR(_Symbol, PERIOD_M1, InpATRPeriod);
+   if(atr_handle == INVALID_HANDLE)
+   {
+      Print("ATR INIT FAILED");
+      return(INIT_FAILED);
+   }
+   
+   ArrayInitialize(spread_buffer, 0);
+   
+   Print("QuantumShield V25 - PROTECTED MODE");
+   return(INIT_SUCCEEDED);
+}
 
-x11vnc -display :1 -forever -shared -nopw -rfbport 5900 &
+//====================================================
+// DEINIT
+//====================================================
+void OnDeinit(const int reason)
+{
+   if(atr_handle != INVALID_HANDLE)
+      IndicatorRelease(atr_handle);
+}
 
-websockify --web=/usr/share/novnc 8080 0.0.0.0:5900 &
+//====================================================
+// POSITION COUNTER
+//====================================================
+int CountPositions()
+{
+   int count = 0;
+   for(int i = PositionsTotal()-1; i >= 0; i--)
+   {
+      if(pos_info.SelectByIndex(i))
+         if(pos_info.Symbol() == _Symbol && pos_info.Magic() == (long)InpMagic)
+            count++;
+   }
+   return count;
+}
 
-wineboot --init
-sleep 5
+//====================================================
+// GET CURRENT ATR
+//====================================================
+double GetATR()
+{
+   double atr_array[1];
+   if(CopyBuffer(atr_handle, 0, 0, 1, atr_array) <= 0)
+   {
+      Print("ATR COPY FAILED");
+      return 0;
+   }
+   return atr_array[0];
+}
 
-MT5_EXE="/root/.wine/drive_c/Program Files/MetaTrader 5/terminal64.exe"
+//====================================================
+// CALCULATE LOT SIZE BY RISK
+//====================================================
+double CalculateLots(double sl_distance)
+{
+   if(sl_distance <= 0)
+      return InpLotSize;
+   
+   double tick_value = SymbolInfoDouble(_Symbol, SYMBOL_TRADE_TICK_VALUE);
+   double tick_size = SymbolInfoDouble(_Symbol, SYMBOL_TRADE_TICK_SIZE);
+   
+   if(tick_value <= 0 || tick_size <= 0)
+      return InpLotSize;
+   
+   double risk_money = AccountInfoDouble(ACCOUNT_BALANCE) * InpRiskPercent / 100.0;
+   double sl_ticks = sl_distance / tick_size;
+   double lot_size = risk_money / (sl_ticks * tick_value);
+   
+   // Normalize
+   double lot_step = SymbolInfoDouble(_Symbol, SYMBOL_VOLUME_STEP);
+   double min_lot = SymbolInfoDouble(_Symbol, SYMBOL_VOLUME_MIN);
+   double max_lot = SymbolInfoDouble(_Symbol, SYMBOL_VOLUME_MAX);
+   
+   lot_size = MathFloor(lot_size / lot_step) * lot_step;
+   lot_size = MathMax(min_lot, MathMin(max_lot, lot_size));
+   
+   return lot_size;
+}
 
-if [ ! -f "\$MT5_EXE" ]; then
-    wine /root/mt5setup.exe /auto
-    sleep 90
-fi
+//====================================================
+// POSITION MANAGER WITH PROTECTION
+//====================================================
+void ManagePositions(MqlTick &tick, double velocity)
+{
+   double atr = GetATR();
+   
+   for(int i = PositionsTotal()-1; i >= 0; i--)
+   {
+      if(!pos_info.SelectByIndex(i))
+         continue;
+      if(pos_info.Symbol() != _Symbol)
+         continue;
+      if(pos_info.Magic() != (long)InpMagic)
+         continue;
+      
+      double net_profit = pos_info.Profit() + pos_info.Swap() + pos_info.Commission();
+      double open_price = pos_info.PriceOpen();
+      double current_sl = pos_info.StopLoss();
+      double current_tp = pos_info.TakeProfit();
+      
+      ENUM_POSITION_TYPE type = (ENUM_POSITION_TYPE)pos_info.PositionType();
+      
+      //================================================
+      // BLUE PROFIT EXIT - Trail profit
+      //================================================
+      if(net_profit >= InpMinProfitUSD)
+      {
+         // Close if velocity slowing down
+         static double peak_profit[100] = {0};
+         static int peak_idx = 0;
+         
+         // Track peak profit per position
+         double pos_peak = 0;
+         for(int j = 0; j < 100; j++)
+         {
+            if(peak_profit[j] > pos_peak)
+               pos_peak = peak_profit[j];
+         }
+         
+         if(net_profit > pos_peak)
+            peak_profit[peak_idx++ % 100] = net_profit;
+         
+         // Close if profit drops 30% from peak
+         if(pos_peak > 0 && net_profit < pos_peak * 0.7)
+         {
+            Print("BLUE PROFIT TRAIL CLOSE: ", net_profit);
+            trade.PositionClose(pos_info.Ticket());
+            continue;
+         }
+      }
+      
+      //================================================
+      // UPDATE STOP LOSS - Trail if profitable
+      //================================================
+      if(atr > 0 && net_profit > 0)
+      {
+         double new_sl = 0;
+         double trail_distance = atr * 1.0;
+         
+         if(type == POSITION_TYPE_BUY)
+         {
+            new_sl = tick.bid - trail_distance;
+            // Only move SL up
+            if(new_sl > current_sl || current_sl == 0)
+               trade.PositionModify(pos_info.Ticket(), new_sl, current_tp);
+         }
+         else if(type == POSITION_TYPE_SELL)
+         {
+            new_sl = tick.ask + trail_distance;
+            // Only move SL down
+            if(new_sl < current_sl || current_sl == 0)
+               trade.PositionModify(pos_info.Ticket(), new_sl, current_tp);
+         }
+      }
+      
+      //================================================
+      // EMERGENCY EXIT
+      //================================================
+      datetime open_time = (datetime)pos_info.Time();
+      int alive_seconds = (int)(TimeCurrent() - open_time);
+      
+      if(alive_seconds > InpEmergencySeconds && net_profit < InpEmergencyLoss)
+      {
+         Print("EMERGENCY CLOSE: ", net_profit, " | Alive: ", alive_seconds, "s");
+         trade.PositionClose(pos_info.Ticket());
+         continue;
+      }
+      
+      // Update daily P&L
+      daily_pnl += net_profit;
+   }
+}
 
-wine "\$MT5_EXE" &
-sleep 30
-
-DATA_DIR=\$(find /root/.wine -type d -path "*MetaQuotes/Terminal/*/MQL5" | head -n 1)
-
-if [ -z "\$DATA_DIR" ]; then
-    DATA_DIR="/root/.wine/drive_c/Program Files/MetaTrader 5/MQL5"
-fi
-
-mkdir -p "\$DATA_DIR/Experts"
-
-cp "/root/OpeningRange_TrendIsolated_EA.ex5" "\$DATA_DIR/Experts/"
-
-
-
-echo "✅ Copied EAs to \$DATA_DIR/Experts/"
-
-ls -la "\$DATA_DIR/Experts/"
-
-python3 -m mt5linux --host 0.0.0.0 --port 8001 &
-
-tail -f /dev/null
-EOF
-
-RUN chmod +x /entrypoint.sh && dos2unix /entrypoint.sh
-
-EXPOSE 8080 8001
-
-CMD ["/bin/bash", "/entrypoint.sh"]
+//====================================================
+// MAIN ENGINE
+//====================================================
+void OnTick()
+{
+   // Check daily loss limit
+   if(TimeCurrent() / 86400 != last_day / 86400)
+   {
+      daily_pnl = 0;
+      last_day = TimeCurrent();
+   }
+   
+   if(daily_pnl < InpDailyLossLimit)
+   {
+      // Silent - stop trading for day
+      return;
+   }
+   
+   if(!TerminalInfoInteger(TERMINAL_TRADE_ALLOWED))
+      return;
+   
+   MqlTick current_tick;
+   if(!SymbolInfoTick(_Symbol, current_tick))
+      return;
+   
+   // Update spread buffer
+   int spread = (int)SymbolInfoInteger(_Symbol, SYMBOL_SPREAD);
+   spread_buffer[spread_idx++ % InpSpreadSamples] = spread;
+   
+   static MqlTick last_tick;
+   if(last_tick.time_msc == 0)
+   {
+      last_tick = current_tick;
+      return;
+   }
+   
+   double time_diff = (current_tick.time_msc - last_tick.time_msc) / 1000.0;
+   if(time_diff <= 0)
+   {
+      last_tick = current_tick;
+      return;
+   }
+   
+   // Price change and velocity
+   double price_change = current_tick.bid - last_tick.bid;
+   double velocity = MathAbs(price_change) / time_diff;
+   
+   // Manage existing positions
+   ManagePositions(current_tick, velocity);
+   
+   // Position limit check
+   if(CountPositions() >= InpMaxPositions)
+   {
+      last_tick = current_tick;
+      return;
+   }
+   
+   // Average spread filter
+   double avg_spread = 0;
+   int valid_samples = 0;
+   for(int i = 0; i < InpSpreadSamples; i++)
+   {
+      if(spread_buffer[i] > 0)
+      {
+         avg_spread += spread_buffer[i];
+         valid_samples++;
+      }
+   }
+   
+   if(valid_samples > 0)
+      avg_spread /= valid_samples;
+   else
+      avg_spread = spread;
+   
+   bool low_spread = spread <= (avg_spread * InpSpreadFactor) && spread <= InpMaxSpread;
+   
+   //================================================
+   // ENTRY ENGINE - KEEP AGGRESSIVE BUT PROTECTED
+   //================================================
+   if(low_spread && velocity >= InpVelocityThreshold)
+   {
+      double atr = GetATR();
+      if(atr <= 0)
+         atr = 0.0001; // Fallback
+      
+      double sl_distance = atr * InpATRMultiplierSL;
+      double tp_distance = atr * InpATRMultiplierTP;
+      
+      double lots = CalculateLots(sl_distance);
+      
+      if(lots <= 0)
+         lots = InpLotSize;
+      
+      // BUY SIGNAL
+      if(price_change > 0)
+      {
+         double sl = current_tick.bid - sl_distance;
+         double tp = current_tick.bid + tp_distance;
+         
+         bool result = trade.Buy(lots, _Symbol, 0, sl, tp, "SHIELD_BUY");
+         
+         if(result)
+            Print("BUY | Lots: ", lots, " | SL: ", sl, " | TP: ", tp, " | Velocity: ", velocity);
+         else
+            Print("BUY FAILED | Error: ", GetLastError());
+      }
+      // SELL SIGNAL
+      else if(price_change < 0)
+      {
+         double sl = current_tick.ask + sl_distance;
+         double tp = current_tick.ask - tp_distance;
+         
+         bool result = trade.Sell(lots, _Symbol, 0, sl, tp, "SHIELD_SELL");
+         
+         if(result)
+            Print("SELL | Lots: ", lots, " | SL: ", sl, " | TP: ", tp, " | Velocity: ", velocity);
+         else
+            Print("SELL FAILED | Error: ", GetLastError());
+      }
+   }
+   
+   last_tick = current_tick;
+}
+//+------------------------------------------------------------------+
