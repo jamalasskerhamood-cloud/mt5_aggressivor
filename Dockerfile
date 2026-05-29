@@ -34,7 +34,10 @@ RUN dpkg --add-architecture i386 && \
 # CREATE DIRECTORIES
 # ============================================
 RUN mkdir -p /mt5
+
 RUN mkdir -p /config/.wine
+
+RUN mkdir -p /config/.wine/drive_c/Program\ Files/MetaTrader\ 5/MQL5/Experts
 
 # ============================================
 # DOWNLOAD MT5
@@ -46,48 +49,41 @@ RUN wget https://download.mql5.com/cdn/web/metaquotes.software.corp/mt5/mt5setup
 # INITIALIZE WINE
 # ============================================
 RUN wineboot --init || true
+
 RUN sleep 20
 
 # ============================================
-# INSTALL MT5 SILENTLY
+# INSTALL MT5
 # ============================================
 RUN xvfb-run wine /mt5/mt5setup.exe /silent || true
+
 RUN sleep 30
 
 # ============================================
-# CREATE MT5 DIRECTORIES SAFELY
+# COPY YOUR EA
 # ============================================
-RUN mkdir -p "/config/.wine/drive_c/Program Files/MetaTrader 5/MQL5/Experts"
+COPY test.mq5 /config/.wine/drive_c/Program\ Files/MetaTrader\ 5/MQL5/Experts/test.mq5
 
 # ============================================
-# COPY YOUR EA FROM GITHUB REPO
-# ============================================
-COPY test.mq5 "/config/.wine/drive_c/Program Files/MetaTrader 5/MQL5/Experts/test.mq5"
-
-# ============================================
-# CREATE AUTO START SCRIPT
+# AUTOSTART MT5
 # ============================================
 RUN mkdir -p /config/.config/autostart
 
-RUN echo '[Desktop Entry]\n\
+RUN printf '[Desktop Entry]\n\
 Type=Application\n\
 Exec=wine "/config/.wine/drive_c/Program Files/MetaTrader 5/terminal64.exe"\n\
 Hidden=false\n\
 NoDisplay=false\n\
 X-GNOME-Autostart-enabled=true\n\
-Name=MT5\n' > /config/.config/autostart/mt5.desktop
+Name=MT5\n' \
+> /config/.config/autostart/mt5.desktop
 
 # ============================================
-# OPTIONAL: AUTO ENABLE ALGO TRADING PROFILE
-# ============================================
-RUN mkdir -p "/config/.wine/drive_c/Program Files/MetaTrader 5/MQL5/Profiles"
-
-# ============================================
-# EXPOSE KASM/WEBTOP PORT
-# ============================================
-EXPOSE 3000
-
-# ============================================
-# HEALTHCHECK
+# OPTIONAL HEALTHCHECK
 # ============================================
 HEALTHCHECK --interval=30s --timeout=10s CMD pgrep wineserver || exit 1
+
+# ============================================
+# EXPOSE PORT
+# ============================================
+EXPOSE 3000
