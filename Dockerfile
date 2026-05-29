@@ -1,134 +1,176 @@
-FROM ubuntu:22.04
+FROM python:3.11-slim-bookworm
+
+USER root
 
 ENV DEBIAN_FRONTEND=noninteractive
-ENV DISPLAY=:99
+ENV DISPLAY=:1
 ENV WINEPREFIX=/root/.wine
 ENV WINEARCH=win64
 ENV WINEDEBUG=-all
 
 # ============================================
-# CORE DEPENDENCIES (LIGHTWEIGHT)
+# ENABLE i386 + INSTALL BASE TOOLS
 # ============================================
 RUN dpkg --add-architecture i386 && \
     apt-get update && \
-    apt-get install -y \
-    wget curl unzip git \
-    xvfb fluxbox x11vnc \
-    python3 python3-pip \
-    wine64 wine32 cabextract \
-    net-tools \
+    apt-get install -y --no-install-recommends \
+    gnupg2 software-properties-common ca-certificates \
+    wget curl git unzip dos2unix procps cabextract xdotool \
+    xvfb fluxbox x11vnc net-tools \
     && rm -rf /var/lib/apt/lists/*
 
 # ============================================
-# noVNC (LATEST STABLE)
+# INSTALL LATEST WINEHQ STABLE
+# ============================================
+RUN mkdir -pm755 /etc/apt/keyrings && \
+    wget -O /etc/apt/keyrings/winehq-archive.key https://dl.winehq.org/wine-builds/winehq.key && \
+    wget -NP /etc/apt/sources.list.d/ https://dl.winehq.org/wine-builds/debian/dists/bookworm/winehq-bookworm.sources && \
+    apt-get update && \
+    apt-get install -y --install-recommends winehq-stable && \
+    wine --version
+
+# ============================================
+# INSTALL LATEST noVNC + WEBSOCKIFY
 # ============================================
 RUN git clone --depth 1 https://github.com/novnc/noVNC.git /opt/novnc && \
     git clone --depth 1 https://github.com/novnc/websockify /opt/novnc/utils/websockify
 
-WORKDIR /app
+# ============================================
+# PYTHON MT5 BRIDGE
+# ============================================
+RUN pip install --no-cache-dir mt5linux rpyc
 
 # ============================================
-# COPY EA (MUST BE EX5 FOR REAL TRADING)
+# DOWNLOAD MT5 INSTALLER
 # ============================================
-COPY test.mq5 /app/test.mq5
+RUN wget -q https://download.mql5.com/cdn/web/metaquotes.software.corp/mt5/mt5setup.exe \
+    -O /root/mt5setup.exe
 
 # ============================================
-# INSTALL MT5 (BUILD TIME)
+# COPY EA
 # ============================================
-RUN Xvfb :99 -screen 0 1024x768x16 & \
-    export DISPLAY=:99 && \
-    sleep 3 && \
-    wineboot --init && \
-    sleep 20 && \
-    mkdir -p /mt5 && cd /mt5 && \
-    wget -O mt5setup.exe https://download.mql5.com/cdn/web/metaquotes.software.corp/mt5/mt5setup.exe && \
-    xvfb-run -a wine mt5setup.exe /silent || true && \
-    sleep 60
+COPY ["test.mq5", "/root/test.mq5"]
 
 # ============================================
-# START SCRIPT (FIXED ORDER - NO RACE CONDITIONS)
+# ENTRYPOINT
 # ============================================
-RUN printf '%s\n' \
-'#!/bin/bash' \
-'' \
-'echo "STARTING MT5 + noVNC (FIXED LIGHTWEIGHT VERSION)"' \
-'' \
-'# =========================' \
-'# 1. START X SERVER FIRST' \
-'# =========================' \
-'Xvfb :99 -screen 0 1024x768x16 -ac -nolisten tcp -noreset &' \
-'sleep 2' \
-'export DISPLAY=:99' \
-'' \
-'# ENSURE X IS READY' \
-'xdpyinfo >/dev/null 2>&1 || true' \
-'' \
-'# =========================' \
-'# 2. START WINDOW MANAGER' \
-'# =========================' \
-'fluxbox &' \
-'sleep 2' \
-'' \
-'# =========================' \
-'# 3. START VNC SERVER (WAIT FOR X)' \
-'# =========================' \
-'x11vnc -display :99 -forever -shared -nopw -rfbport 5900 -wait 50 -noxdamage &' \
-'sleep 2' \
-'' \
-'# =========================' \
-'# 4. START noVNC WEB CLIENT' \
-'# =========================' \
-'/opt/novnc/utils/novnc_proxy --vnc localhost:5900 --listen 6080 &' \
-'sleep 2' \
-'' \
-'# =========================' \
-'# 5. START SIMPLE STATUS SERVER' \
-'# =========================' \
-'mkdir -p /web' \
-'echo "MT5 READY" > /web/index.html' \
-'cd /web && python3 -m http.server 8080 &' \
-'' \
-'# =========================' \
-'# 6. FIND MT5 BINARY' \
-'# =========================' \
-'MT5=$(find /root/.wine -iname terminal64.exe | head -1)' \
-'' \
-'if [ -z "$MT5" ]; then' \
-'  echo "MT5 NOT FOUND - EXITING"' \
-'  tail -f /dev/null' \
-'fi' \
-'' \
-'echo "MT5 FOUND: $MT5"' \
-'' \
-'# =========================' \
-'# 7. START MT5 (DELAYED FOR STABILITY)' \
-'# =========================' \
-'sleep 8' \
-'wine "$MT5" /portable &' \
-'' \
-'sleep 20' \
-'' \
-'# =========================' \
-'# 8. INSTALL EA' \
-'# =========================' \
-'EXPERTS=$(find /root/.wine -type d -path "*MQL5/Experts" | head -1)' \
-'' \
-'if [ ! -z "$EXPERTS" ]; then' \
-'  cp /app/EA.ex5 "$EXPERTS/EA.ex5"' \
-'  echo "EA INSTALLED SUCCESSFULLY"' \
-'fi' \
-'' \
-'# =========================' \
-'# 9. KEEP ALIVE LOOP' \
-'# =========================' \
-'echo "SYSTEM READY - OPEN noVNC"' \
-'' \
-'tail -f /dev/null' \
-> /start.sh && chmod +x /start.sh
+RUN cat > /entrypoint.sh <<'EOF'
+#!/bin/bash
+set -e
+
+echo "======================================="
+echo "STARTING MT5 + LATEST noVNC + WINEHQ"
+echo "======================================="
+
+rm -rf /tmp/.X*
+
+# ========================================
+# START XVFB
+# ========================================
+Xvfb :1 -screen 0 1280x1024x24 -ac +extension GLX +render -noreset &
+export DISPLAY=:1
+
+sleep 3
+
+# ========================================
+# START FLUXBOX
+# ========================================
+fluxbox &
+sleep 2
+
+# ========================================
+# START VNC SERVER
+# ========================================
+x11vnc \
+-display :1 \
+-forever \
+-shared \
+-nopw \
+-rfbport 5900 \
+-wait 50 \
+-noxdamage \
+&
+sleep 2
+
+# ========================================
+# START noVNC
+# ========================================
+/opt/novnc/utils/novnc_proxy \
+--vnc localhost:5900 \
+--listen 8080 \
+&
+sleep 3
+
+# ========================================
+# INIT WINE
+# ========================================
+wineboot --init
+sleep 10
+
+MT5_EXE="/root/.wine/drive_c/Program Files/MetaTrader 5/terminal64.exe"
+
+# ========================================
+# INSTALL MT5 IF MISSING
+# ========================================
+if [ ! -f "$MT5_EXE" ]; then
+    echo "Installing MT5..."
+    wine /root/mt5setup.exe /auto
+    sleep 90
+fi
+
+# ========================================
+# START MT5
+# ========================================
+echo "Launching MT5..."
+wine "$MT5_EXE" /portable &
+sleep 30
+
+# ========================================
+# FIND MT5 DATA DIRECTORY
+# ========================================
+DATA_DIR=$(find /root/.wine -type d -path "*MetaQuotes/Terminal/*/MQL5" | head -n 1)
+
+if [ -z "$DATA_DIR" ]; then
+    DATA_DIR="/root/.wine/drive_c/Program Files/MetaTrader 5/MQL5"
+fi
+
+mkdir -p "$DATA_DIR/Experts"
+
+# ========================================
+# COPY EA
+# ========================================
+cp "/root/test.mq5" "$DATA_DIR/Experts/"
+
+echo "======================================="
+echo "EA INSTALLED:"
+echo "$DATA_DIR/Experts/"
+echo "======================================="
+
+ls -la "$DATA_DIR/Experts/"
+
+# ========================================
+# START PYTHON MT5 BRIDGE
+# ========================================
+python3 -m mt5linux --host 0.0.0.0 --port 8001 &
+
+echo "======================================="
+echo "SYSTEM READY"
+echo "Open noVNC in browser:"
+echo "/vnc.html"
+echo "======================================="
+
+# ========================================
+# KEEP CONTAINER ALIVE
+# ========================================
+tail -f /dev/null
+
+EOF
+
+RUN chmod +x /entrypoint.sh && dos2unix /entrypoint.sh
 
 # ============================================
-# EXPOSE PORTS
+# PORTS
 # ============================================
-EXPOSE 8080 6080 5900
+EXPOSE 8080 8001
 
-CMD ["/start.sh"]
+CMD ["/bin/bash", "/entrypoint.sh"]
