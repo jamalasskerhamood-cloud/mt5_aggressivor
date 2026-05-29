@@ -1,9 +1,9 @@
 //+------------------------------------------------------------------+
-//|          QuantumShield_TICK_MASTER_PROFIT.mq5                    |
-//|        PURE TICK TRADING + GUARANTEED PROFIT EXITS               |
+//|          QuantumShield_ORDERFLOW_PROFIT.mq5                      |
+//|        REAL EDGE: ORDER FLOW IMBALANCE + INSTANT EXITS           |
 //+------------------------------------------------------------------+
-#property copyright "Tick Master Professional"
-#property version   "31.00"
+#property copyright "Order Flow Professional"
+#property version   "32.00"
 #property strict
 
 #include <Trade/Trade.mqh>
@@ -11,56 +11,68 @@
 
 input double InpLotSize              = 0.05;
 
-// ASYMMETRIC RISK:REWARD - THE REAL SECRET
-input double InpTakeProfitPips       = 10.0;    // Big winners
-input double InpStopLossPips         = 5.0;     // Small losers
+// TIGHT SPREAD FOR FAST EXITS
+input double InpTakeProfitPips       = 3.0;     // Quick 3 pip target
+input double InpStopLossPips         = 2.0;     // Tiny 2 pip stop
 
-// TICK-BASED ENTRY PARAMETERS
-input double InpMinTickMomentum      = 0.3;     // Minimum pips per tick for entry
-input int    InpTickConfirmation     = 2;       // Number of consecutive ticks in same direction
-input double InpReversalThreshold    = 0.5;     // Pips reversal to confirm sweep
+// ORDER FLOW IMBALANCE DETECTION
+input int    InpImbalanceTicks       = 20;      // Ticks to analyze
+input double InpImbalanceRatio       = 1.5;     // Bid volume vs Ask volume ratio
+input double InpMinPriceMove         = 0.2;     // Minimum price movement
 
-// LIQUIDITY SWEEP DETECTION - ON TICKS
-input int    InpTicksLookback        = 100;     // Ticks for swing detection
-input double InpSweepThreshold       = 0.3;     // Pips beyond swing for sweep
+// MARKET MAKER PATTERNS
+input int    InpAbsorptionTicks      = 10;      // Absorption pattern detection
+input double InpAbsorptionThreshold  = 0.3;     // Price stall threshold
 
-// VOLUME SPIKE DETECTION - ON TICKS
-input double InpVolumeMultiplier     = 1.3;     // Volume spike threshold
-input int    InpVolumeTicks          = 50;      // Ticks for volume average
+// AGGRESSIVE SPEED SETTINGS
+input int    InpMaxPositions         = 2;
+input int    InpMaxDailyTrades       = 500;
+input int    InpCooldownMs           = 50;      // 50ms - ULTRA FAST
+input int    InpMaxTradesPerSecond   = 5;
 
-// AGGRESSIVE SETTINGS
-input int    InpMaxPositions         = 3;       // Multiple positions
-input int    InpMaxDailyTrades       = 500;     // High frequency
-input int    InpCooldownMs           = 100;     // 100ms between trades
-input int    InpMaxTradesPerSecond   = 3;       // Max 3 trades/second
-
-// GUARANTEED PROFIT EXITS
-input double InpMinProfitLock        = 2.0;     // Lock profit at 2 pips
-input double InpTrailStartPips       = 3.0;     // Start trailing at 3 pips
-input double InpTrailDistancePips    = 1.5;     // Tight 1.5 pip trail
-input int    InpMaxTradeSeconds      = 120;     // Max 2 minutes per trade
+// INSTANT PROFIT EXITS
+input double InpInstantProfitPips    = 1.0;     // Exit at 1 pip if stalling
+input double InpStallThreshold       = 0.3;     // Stall detection
+input int    InpStallTicks           = 5;       // Ticks for stall detection
+input int    InpMaxTradeSeconds      = 60;      // Max 60 seconds
 
 // MONEY MANAGEMENT
-input double InpDailyProfitTarget    = 200.0;   // Higher target
-input double InpDailyLossLimit       = -50.0;
+input double InpDailyProfitTarget    = 100.0;
+input double InpDailyLossLimit       = -30.0;
 
 input ulong  InpMagic                = 909090;
 
 CTrade        trade;
 CPositionInfo pos_info;
 
-// Tick data buffers
-struct TickData
+// Tick data for order flow analysis
+struct TickInfo
 {
    double bid;
    double ask;
-   long volume;
+   long bid_volume;
+   long ask_volume;
    datetime time_msc;
+   bool is_bid_tick;  // true if bid changed, false if ask changed
 };
 
-TickData tick_buffer[];
+TickInfo tick_buffer[100];
 int tick_count = 0;
-int buffer_size = 200;
+
+// Trade tracking
+struct ActiveTrade
+{
+   ulong ticket;
+   double entry_price;
+   double best_price;
+   double best_profit_pips;
+   datetime entry_time;
+   int stall_ticks;
+   bool profit_locked;
+};
+
+ActiveTrade trades[2];
+int active_trades = 0;
 
 // Daily tracking
 int daily_trades = 0;
@@ -68,24 +80,10 @@ double daily_pnl = 0;
 datetime current_day = 0;
 double starting_balance = 0;
 
-// Second tracking
+// Speed tracking
 int second_trades = 0;
 datetime current_second = 0;
 ulong last_trade_ms = 0;
-
-// Trade tracking for guaranteed profit
-struct TradeTracker
-{
-   ulong ticket;
-   double entry_price;
-   double peak_profit_pips;
-   double peak_profit_price;
-   datetime entry_time;
-   bool partial_closed;
-};
-
-TradeTracker active_trades[3];
-int active_count = 0;
 
 //====================================================
 // INIT
@@ -93,27 +91,28 @@ int active_count = 0;
 int OnInit()
 {
    trade.SetExpertMagicNumber(InpMagic);
-   trade.SetDeviationInPoints(15);
-   trade.SetAsyncMode(true);  // ASYNC FOR TICK SPEED
+   trade.SetDeviationInPoints(10);
+   trade.SetAsyncMode(true);
    
-   ArrayResize(tick_buffer, buffer_size);
+   ArrayInitialize(tick_buffer, 0);
    
-   for(int i = 0; i < 3; i++)
-      active_trades[i].ticket = 0;
+   for(int i = 0; i < 2; i++)
+   {
+      trades[i].ticket = 0;
+      trades[i].profit_locked = false;
+   }
    
    starting_balance = AccountInfoDouble(ACCOUNT_BALANCE);
    current_day = TimeCurrent() / 86400;
    
    Print("═══════════════════════════════════════");
-   Print("⚡ TICK MASTER - PURE TICK TRADING");
-   Print("TP: ", InpTakeProfitPips, " | SL: ", InpStopLossPips);
-   Print("Risk:Reward = 1:", InpTakeProfitPips/InpStopLossPips);
-   Print("Min Tick Momentum: ", InpMinTickMomentum, " pips");
-   Print("Cooldown: ", InpCooldownMs, "ms");
-   Print("Max Trades/sec: ", InpMaxTradesPerSecond);
-   Print("Guaranteed Profit Lock: ", InpMinProfitLock, " pips");
-   Print("Max Trade Time: ", InpMaxTradeSeconds, "s");
-   Print("Starting Balance: $", DoubleToString(starting_balance, 2));
+   Print("💎 ORDER FLOW PROFIT MASTER");
+   Print("TP: ", InpTakeProfitPips, " pips | SL: ", InpStopLossPips, " pips");
+   Print("Win Rate Target: 70-80%");
+   Print("Imbalance Ratio: ", InpImbalanceRatio, ":1");
+   Print("Instant Profit Exit: ", InpInstantProfitPips, " pips");
+   Print("Max Trade Time: ", InpMaxTradeSeconds, " seconds");
+   Print("Starting: $", DoubleToString(starting_balance, 2));
    Print("═══════════════════════════════════════");
    
    return(INIT_SUCCEEDED);
@@ -125,12 +124,14 @@ int OnInit()
 void OnDeinit(const int reason)
 {
    double final_balance = AccountInfoDouble(ACCOUNT_BALANCE);
+   double net = final_balance - starting_balance;
+   
    Print("═══════════════════════════════════════");
-   Print("📊 TICK MASTER SUMMARY");
-   Print("Starting: $", DoubleToString(starting_balance, 2));
-   Print("Final: $", DoubleToString(final_balance, 2));
-   Print("Net: $", DoubleToString(final_balance - starting_balance, 2));
-   Print("Total Trades: ", daily_trades);
+   Print("📊 FINAL RESULTS");
+   Print("Profit: $", DoubleToString(net, 2));
+   Print("Trades Today: ", daily_trades);
+   if(daily_trades > 0)
+      Print("Avg per trade: $", DoubleToString(net/daily_trades, 3));
    Print("═══════════════════════════════════════");
 }
 
@@ -160,140 +161,126 @@ double GetPipSize()
 }
 
 //====================================================
-// ADD TICK TO BUFFER
+// ADD TICK TO ORDER FLOW BUFFER
 //====================================================
 void AddTick(MqlTick &tick)
 {
-   if(tick_count >= buffer_size)
+   static double last_bid = 0;
+   static double last_ask = 0;
+   
+   if(tick_count >= 100)
    {
-      // Shift buffer left
-      for(int i = 0; i < buffer_size - 1; i++)
+      for(int i = 0; i < 99; i++)
          tick_buffer[i] = tick_buffer[i + 1];
-      tick_count = buffer_size - 1;
+      tick_count = 99;
    }
    
    tick_buffer[tick_count].bid = tick.bid;
    tick_buffer[tick_count].ask = tick.ask;
-   tick_buffer[tick_count].volume = tick.volume_real;
+   tick_buffer[tick_count].bid_volume = tick.volume_real;
+   tick_buffer[tick_count].ask_volume = tick.volume_real;
    tick_buffer[tick_count].time_msc = tick.time_msc;
+   
+   // Determine if bid or ask driven
+   if(tick.bid != last_bid)
+      tick_buffer[tick_count].is_bid_tick = true;
+   else if(tick.ask != last_ask)
+      tick_buffer[tick_count].is_bid_tick = false;
+   
+   last_bid = tick.bid;
+   last_ask = tick.ask;
    tick_count++;
 }
 
 //====================================================
-// DETECT TICK MOMENTUM
+// ANALYZE ORDER FLOW IMBALANCE
 //====================================================
-double GetTickMomentum(int lookback)
+double GetOrderFlowImbalance()
 {
-   if(tick_count < lookback + 1) return 0;
+   if(tick_count < InpImbalanceTicks) return 0;
    
-   double pip_size = GetPipSize();
-   double total_momentum = 0;
-   int same_direction = 0;
+   int bid_ticks = 0;
+   int ask_ticks = 0;
+   long bid_volume = 0;
+   long ask_volume = 0;
    
-   for(int i = tick_count - lookback; i < tick_count - 1; i++)
+   int start = tick_count - InpImbalanceTicks;
+   
+   for(int i = start; i < tick_count; i++)
    {
-      double change = (tick_buffer[i + 1].bid - tick_buffer[i].bid) / pip_size;
-      total_momentum += change;
-      
-      if((change > 0 && total_momentum > 0) || (change < 0 && total_momentum < 0))
-         same_direction++;
+      if(tick_buffer[i].is_bid_tick)
+      {
+         bid_ticks++;
+         bid_volume += tick_buffer[i].bid_volume;
+      }
+      else
+      {
+         ask_ticks++;
+         ask_volume += tick_buffer[i].ask_volume;
+      }
    }
    
-   // Return momentum only if consecutive ticks in same direction
-   if(same_direction >= InpTickConfirmation)
-      return total_momentum;
+   // Calculate imbalance ratio
+   double imbalance = 0;
    
-   return 0;
+   if(ask_ticks > 0 && ask_volume > 0)
+   {
+      double tick_ratio = (double)bid_ticks / (double)ask_ticks;
+      double vol_ratio = (double)bid_volume / (double)ask_volume;
+      
+      // Positive = buying pressure, Negative = selling pressure
+      imbalance = (tick_ratio + vol_ratio) / 2.0 - 1.0;
+   }
+   
+   return imbalance;
 }
 
 //====================================================
-// DETECT SWINGS FROM TICKS
+// DETECT MARKET MAKER ABSORPTION
 //====================================================
-void DetectTickSwings(double &swing_high, double &swing_low)
+bool DetectAbsorption(int direction)
 {
-   if(tick_count < InpTicksLookback) return;
+   if(tick_count < InpAbsorptionTicks) return false;
    
-   swing_high = 0;
-   swing_low = 999999;
+   int start = tick_count - InpAbsorptionTicks;
+   double first_price = (direction > 0) ? tick_buffer[start].ask : tick_buffer[start].bid;
+   double last_price = (direction > 0) ? tick_buffer[tick_count-1].ask : tick_buffer[tick_count-1].bid;
    
-   int start = tick_count - InpTicksLookback;
-   if(start < 0) start = 0;
+   double price_change = MathAbs(last_price - first_price) / GetPipSize();
    
-   for(int i = start + 1; i < tick_count - 1; i++)
-   {
-      // Swing high
-      if(tick_buffer[i].bid > tick_buffer[i-1].bid && tick_buffer[i].bid > tick_buffer[i+1].bid)
-         if(tick_buffer[i].bid > swing_high)
-            swing_high = tick_buffer[i].bid;
-      
-      // Swing low
-      if(tick_buffer[i].bid < tick_buffer[i-1].bid && tick_buffer[i].bid < tick_buffer[i+1].bid)
-         if(tick_buffer[i].bid < swing_low)
-            swing_low = tick_buffer[i].bid;
-   }
+   // Absorption = high volume but price barely moved
+   long total_volume = 0;
+   for(int i = start; i < tick_count; i++)
+      total_volume += tick_buffer[i].bid_volume + tick_buffer[i].ask_volume;
+   
+   return (price_change < InpAbsorptionThreshold && total_volume > 100);
 }
 
 //====================================================
-// CHECK TICK VOLUME SPIKE
+// CHECK PRICE STALLING
 //====================================================
-bool IsTickVolumeSpike()
+bool IsPriceStalling(int direction, MqlTick &tick)
 {
-   if(tick_count < InpVolumeTicks + 1) return false;
+   if(tick_count < InpStallTicks) return false;
    
-   double current_vol = tick_buffer[tick_count - 1].volume;
-   double avg_vol = 0;
+   double current_price = (direction > 0) ? tick.bid : tick.ask;
+   int start = tick_count - InpStallTicks;
    
-   int start = tick_count - InpVolumeTicks - 1;
+   double max_move = 0;
    for(int i = start; i < tick_count - 1; i++)
-      avg_vol += tick_buffer[i].volume;
-   
-   avg_vol /= InpVolumeTicks;
-   
-   return (avg_vol > 0 && current_vol > avg_vol * InpVolumeMultiplier);
-}
-
-//====================================================
-// CHECK LIQUIDITY SWEEP ON TICKS
-//====================================================
-int CheckTickSweep()
-{
-   double swing_high = 0, swing_low = 999999;
-   DetectTickSwings(swing_high, swing_low);
-   
-   if(swing_high == 0 || swing_low == 999999) return 0;
-   
-   double pip_size = GetPipSize();
-   double sweep_dist = InpSweepThreshold * pip_size;
-   
-   // Check recent ticks for sweep
-   for(int i = tick_count - 10; i < tick_count; i++)
    {
-      if(i < 0) continue;
-      
-      // Bearish sweep (below swing low)
-      if(tick_buffer[i].bid < swing_low - sweep_dist)
-      {
-         // Check if price recovered
-         if(tick_buffer[tick_count - 1].bid > swing_low)
-            return 1; // Bullish reversal
-      }
-      
-      // Bullish sweep (above swing high)
-      if(tick_buffer[i].ask > swing_high + sweep_dist)
-      {
-         // Check if price recovered
-         if(tick_buffer[tick_count - 1].ask < swing_high)
-            return -1; // Bearish reversal
-      }
+      double price = (direction > 0) ? tick_buffer[i].bid : tick_buffer[i].ask;
+      double move = MathAbs(current_price - price) / GetPipSize();
+      if(move > max_move) max_move = move;
    }
    
-   return 0;
+   return (max_move < InpStallThreshold);
 }
 
 //====================================================
-// GUARANTEED PROFIT EXIT MANAGEMENT
+// INSTANT PROFIT EXIT SYSTEM
 //====================================================
-void GuaranteedProfitExit(MqlTick &tick)
+void InstantProfitExit(MqlTick &tick)
 {
    double pip_size = GetPipSize();
    
@@ -305,11 +292,8 @@ void GuaranteedProfitExit(MqlTick &tick)
       ulong ticket = pos_info.Ticket();
       double net_profit = pos_info.Profit() + pos_info.Swap() + pos_info.Commission();
       double open_price = pos_info.PriceOpen();
-      double current_sl = pos_info.StopLoss();
-      double current_tp = pos_info.TakeProfit();
       ENUM_POSITION_TYPE type = (ENUM_POSITION_TYPE)pos_info.PositionType();
       
-      // Calculate pips profit
       double pips_profit = 0;
       double current_price = 0;
       
@@ -324,146 +308,118 @@ void GuaranteedProfitExit(MqlTick &tick)
          current_price = tick.ask;
       }
       
-      // Find tracker for this trade
-      int tracker_idx = -1;
-      for(int j = 0; j < 3; j++)
+      // Find trade tracker
+      int idx = -1;
+      for(int j = 0; j < 2; j++)
       {
-         if(active_trades[j].ticket == ticket)
-         {
-            tracker_idx = j;
-            break;
-         }
+         if(trades[j].ticket == ticket) { idx = j; break; }
       }
       
-      if(tracker_idx == -1)
+      if(idx == -1)
       {
-         // Create new tracker
-         for(int j = 0; j < 3; j++)
+         for(int j = 0; j < 2; j++)
          {
-            if(active_trades[j].ticket == 0)
+            if(trades[j].ticket == 0)
             {
-               active_trades[j].ticket = ticket;
-               active_trades[j].entry_price = open_price;
-               active_trades[j].peak_profit_pips = 0;
-               active_trades[j].entry_time = TimeCurrent();
-               active_trades[j].partial_closed = false;
-               tracker_idx = j;
+               trades[j].ticket = ticket;
+               trades[j].entry_price = open_price;
+               trades[j].best_price = current_price;
+               trades[j].best_profit_pips = 0;
+               trades[j].entry_time = TimeCurrent();
+               trades[j].stall_ticks = 0;
+               trades[j].profit_locked = false;
+               idx = j;
                break;
             }
          }
       }
       
-      if(tracker_idx == -1) continue;
+      if(idx == -1) continue;
       
-      // Update peak profit
-      if(pips_profit > active_trades[tracker_idx].peak_profit_pips)
+      // Update best profit
+      if(pips_profit > trades[idx].best_profit_pips)
       {
-         active_trades[tracker_idx].peak_profit_pips = pips_profit;
-         active_trades[tracker_idx].peak_profit_price = current_price;
+         trades[idx].best_profit_pips = pips_profit;
+         trades[idx].best_price = current_price;
+         trades[idx].stall_ticks = 0;
+      }
+      else
+      {
+         trades[idx].stall_ticks++;
       }
       
-      double peak_pips = active_trades[tracker_idx].peak_profit_pips;
+      int direction = (type == POSITION_TYPE_BUY) ? 1 : -1;
       
       //================================================
-      // EXIT 1: GUARANTEED PROFIT LOCK at 2+ pips
+      // EXIT 1: INSTANT PROFIT - The moment we have 1+ pip, watch for stalling
       //================================================
-      if(pips_profit >= InpMinProfitLock && peak_pips - pips_profit >= InpReversalThreshold)
+      if(pips_profit >= InpInstantProfitPips && !trades[idx].profit_locked)
       {
-         Print("💰 GUARANTEED PROFIT | Peak: +", DoubleToString(peak_pips, 1), 
-               "p | Exit: +", DoubleToString(pips_profit, 1), "p | $", DoubleToString(net_profit, 3));
-         trade.PositionClose(ticket);
-         active_trades[tracker_idx].ticket = 0;
-         daily_pnl += net_profit;
-         continue;
-      }
-      
-      //================================================
-      // EXIT 2: TRAILING STOP - Lock in profits
-      //================================================
-      if(pips_profit >= InpTrailStartPips)
-      {
-         double trail_distance = InpTrailDistancePips * pip_size;
-         double new_sl = 0;
-         
-         if(type == POSITION_TYPE_BUY)
-            new_sl = tick.bid - trail_distance;
-         else
-            new_sl = tick.ask + trail_distance;
-         
-         if((type == POSITION_TYPE_BUY && new_sl > current_sl) ||
-            (type == POSITION_TYPE_SELL && (new_sl < current_sl || current_sl == 0)))
+         if(IsPriceStalling(direction, tick) || trades[idx].stall_ticks >= InpStallTicks)
          {
-            if(trade.PositionModify(ticket, new_sl, current_tp))
-            {
-               Print("📈 TRAIL +", DoubleToString(pips_profit, 1), "p | SL: ", DoubleToString(new_sl, 5));
-            }
-         }
-      }
-      
-      //================================================
-      // EXIT 3: BREAKEVEN MOVE at 3+ pips
-      //================================================
-      if(pips_profit >= 3.0 && current_sl != open_price)
-      {
-         double new_sl = open_price;
-         if(type == POSITION_TYPE_BUY)
-            new_sl = open_price + (pip_size * 0.3);
-         else
-            new_sl = open_price - (pip_size * 0.3);
-         
-         if((type == POSITION_TYPE_BUY && new_sl > current_sl) ||
-            (type == POSITION_TYPE_SELL && new_sl < current_sl))
-         {
-            trade.PositionModify(ticket, new_sl, current_tp);
-            Print("🛡️ BREAKEVEN+ at +", DoubleToString(pips_profit, 1), "p");
-         }
-      }
-      
-      //================================================
-      // EXIT 4: TIME STOP - No dead trades
-      //================================================
-      int seconds_open = (int)(TimeCurrent() - active_trades[tracker_idx].entry_time);
-      
-      if(seconds_open > InpMaxTradeSeconds && pips_profit < 2.0)
-      {
-         Print("⏰ TIME STOP | ", seconds_open, "s | ", DoubleToString(pips_profit, 1), "p");
-         trade.PositionClose(ticket);
-         active_trades[tracker_idx].ticket = 0;
-         daily_pnl += net_profit;
-         continue;
-      }
-      
-      //================================================
-      // EXIT 5: MOMENTUM DEATH - No more movement
-      //================================================
-      if(seconds_open > 30 && pips_profit > 0.5 && pips_profit < 2.0)
-      {
-         // Check if price hasn't moved in last 10 seconds
-         if(peak_pips - pips_profit < 0.2 && peak_pips < 2.5)
-         {
-            Print("💤 MOMENTUM DEATH | +", DoubleToString(pips_profit, 1), "p | $", DoubleToString(net_profit, 3));
+            Print("💰 INSTANT PROFIT | +", DoubleToString(pips_profit, 1), "p | $", DoubleToString(net_profit, 3));
             trade.PositionClose(ticket);
-            active_trades[tracker_idx].ticket = 0;
+            trades[idx].ticket = 0;
             daily_pnl += net_profit;
             continue;
          }
       }
+      
+      //================================================
+      // EXIT 2: PEAK REVERSAL - Price reversed 0.5 pips from best
+      //================================================
+      if(trades[idx].best_profit_pips >= 1.5 && pips_profit <= trades[idx].best_profit_pips - 0.5)
+      {
+         Print("📉 PEAK REVERSAL | Best: +", DoubleToString(trades[idx].best_profit_pips, 1), 
+               "p | Exit: +", DoubleToString(pips_profit, 1), "p | $", DoubleToString(net_profit, 3));
+         trade.PositionClose(ticket);
+         trades[idx].ticket = 0;
+         daily_pnl += net_profit;
+         continue;
+      }
+      
+      //================================================
+      // EXIT 3: TIME LIMIT - No patience
+      //================================================
+      int seconds_open = (int)(TimeCurrent() - trades[idx].entry_time);
+      
+      if(seconds_open >= InpMaxTradeSeconds)
+      {
+         if(pips_profit > 0)
+         {
+            Print("⏰ TIME EXIT | +", DoubleToString(pips_profit, 1), "p | ", seconds_open, "s");
+            trade.PositionClose(ticket);
+            trades[idx].ticket = 0;
+            daily_pnl += net_profit;
+            continue;
+         }
+      }
+      
+      //================================================
+      // EXIT 4: MICRO PROFIT - Even 0.5 pip profit is fine
+      //================================================
+      if(pips_profit > 0 && pips_profit < 1.0 && trades[idx].stall_ticks >= 8)
+      {
+         Print("💵 MICRO PROFIT | +", DoubleToString(pips_profit, 1), "p | $", DoubleToString(net_profit, 4));
+         trade.PositionClose(ticket);
+         trades[idx].ticket = 0;
+         daily_pnl += net_profit;
+         continue;
+      }
    }
    
-   // Clean up trackers for closed positions
-   for(int j = 0; j < 3; j++)
+   // Clean closed trades
+   for(int j = 0; j < 2; j++)
    {
-      if(active_trades[j].ticket != 0)
+      if(trades[j].ticket != 0)
       {
          bool found = false;
          for(int i = PositionsTotal()-1; i >= 0; i--)
          {
             if(pos_info.SelectByIndex(i))
-               if(pos_info.Ticket() == active_trades[j].ticket)
-                  found = true;
+               if(pos_info.Ticket() == trades[j].ticket) found = true;
          }
-         if(!found)
-            active_trades[j].ticket = 0;
+         if(!found) trades[j].ticket = 0;
       }
    }
 }
@@ -476,7 +432,7 @@ void CheckNewDay()
    datetime new_day = TimeCurrent() / 86400;
    if(new_day != current_day)
    {
-      Print("📅 NEW DAY | Yesterday: $", DoubleToString(daily_pnl, 2), " | Trades: ", daily_trades);
+      Print("📅 NEW DAY | P&L: $", DoubleToString(daily_pnl, 2), " | Trades: ", daily_trades);
       daily_trades = 0;
       daily_pnl = 0;
       current_day = new_day;
@@ -484,43 +440,42 @@ void CheckNewDay()
 }
 
 //====================================================
-// EXECUTE TRADE - Ultra fast tick-based
+// EXECUTE TRADE
 //====================================================
-void ExecuteTrade(int direction, string signal)
+void ExecuteTrade(int direction, string reason)
 {
    MqlTick tick;
    if(!SymbolInfoTick(_Symbol, tick)) return;
    
    double pip_size = GetPipSize();
-   double sl_distance = InpStopLossPips * pip_size;
-   double tp_distance = InpTakeProfitPips * pip_size;
-   double lots = InpLotSize;
+   double sl_dist = InpStopLossPips * pip_size;
+   double tp_dist = InpTakeProfitPips * pip_size;
    
    double min_stops = SymbolInfoInteger(_Symbol, SYMBOL_TRADE_STOPS_LEVEL) * SymbolInfoDouble(_Symbol, SYMBOL_POINT) * 2;
-   if(sl_distance < min_stops) sl_distance = min_stops;
-   if(tp_distance < min_stops) tp_distance = min_stops;
+   if(sl_dist < min_stops) sl_dist = min_stops;
+   if(tp_dist < min_stops) tp_dist = min_stops;
    
-   if(direction == 1) // BUY
+   if(direction == 1)
    {
-      double sl = tick.bid - sl_distance;
-      double tp = tick.bid + tp_distance;
+      double sl = tick.bid - sl_dist;
+      double tp = tick.bid + tp_dist;
       
-      if(trade.Buy(lots, _Symbol, 0, sl, tp, signal))
+      if(trade.Buy(InpLotSize, _Symbol, 0, sl, tp, reason))
       {
-         Print("🟢 ", signal, " | ", tick.bid, " | Vol: ", tick.volume_real);
+         Print("🟢 ", reason, " | Bid: ", tick.bid, " | Imbalance: ", DoubleToString(GetOrderFlowImbalance(), 2));
          second_trades++;
          daily_trades++;
          last_trade_ms = GetTickCount();
       }
    }
-   else if(direction == -1) // SELL
+   else
    {
-      double sl = tick.ask + sl_distance;
-      double tp = tick.ask - tp_distance;
+      double sl = tick.ask + sl_dist;
+      double tp = tick.ask - tp_dist;
       
-      if(trade.Sell(lots, _Symbol, 0, sl, tp, signal))
+      if(trade.Sell(InpLotSize, _Symbol, 0, sl, tp, reason))
       {
-         Print("🔴 ", signal, " | ", tick.ask, " | Vol: ", tick.volume_real);
+         Print("🔴 ", reason, " | Ask: ", tick.ask, " | Imbalance: ", DoubleToString(GetOrderFlowImbalance(), 2));
          second_trades++;
          daily_trades++;
          last_trade_ms = GetTickCount();
@@ -529,13 +484,13 @@ void ExecuteTrade(int direction, string signal)
 }
 
 //====================================================
-// MAIN ENGINE - PURE TICK TRADING
+// MAIN ENGINE - ORDER FLOW PROFIT
 //====================================================
 void OnTick()
 {
    CheckNewDay();
    
-   // DAILY LIMITS
+   // Daily limits
    if(daily_trades >= InpMaxDailyTrades || daily_pnl >= InpDailyProfitTarget || daily_pnl <= InpDailyLossLimit)
       return;
    
@@ -544,16 +499,16 @@ void OnTick()
    MqlTick current_tick;
    if(!SymbolInfoTick(_Symbol, current_tick)) return;
    
-   // ADD TICK TO BUFFER
+   // Add tick to buffer
    AddTick(current_tick);
    
-   // GUARANTEED PROFIT EXITS - CHECK EVERY TICK
-   GuaranteedProfitExit(current_tick);
+   // INSTANT PROFIT EXITS - Every tick
+   InstantProfitExit(current_tick);
    
-   // POSITION LIMIT
+   // Position limit
    if(CountPositions() >= InpMaxPositions) return;
    
-   // SECOND LIMIT
+   // Per-second limit
    if(TimeCurrent() != current_second)
    {
       second_trades = 0;
@@ -561,94 +516,94 @@ void OnTick()
    }
    if(second_trades >= InpMaxTradesPerSecond) return;
    
-   // COOLDOWN
+   // Cooldown
    if(GetTickCount() - last_trade_ms < InpCooldownMs) return;
    
-   // SPREAD CHECK
+   // Spread check
    int spread = (int)SymbolInfoInteger(_Symbol, SYMBOL_SPREAD);
-   if(spread > 25) return;
+   if(spread > 20) return;
    
    //================================================
-   // TICK-BASED ENTRY SIGNALS
+   // ORDER FLOW ANALYSIS
    //================================================
    
+   double imbalance = GetOrderFlowImbalance();
    double pip_size = GetPipSize();
    
-   // SIGNAL 1: TICK MOMENTUM - Consecutive ticks in same direction
-   double momentum = GetTickMomentum(5); // Last 5 ticks
-   
-   if(MathAbs(momentum) >= InpMinTickMomentum)
+   // Calculate recent price movement
+   double price_move = 0;
+   if(tick_count >= 5)
    {
-      if(momentum > 0)
+      price_move = (current_tick.bid - tick_buffer[tick_count - 5].bid) / pip_size;
+   }
+   
+   //================================================
+   // SIGNAL 1: STRONG BUYING IMBALANCE
+   // Buyers are aggressive - price will go up
+   //================================================
+   if(imbalance > InpImbalanceRatio / 10.0 && price_move > 0)
+   {
+      if(DetectAbsorption(1))
       {
-         ExecuteTrade(1, "TICK_MOMENTUM_BUY");
-         return;
-      }
-      else
-      {
-         ExecuteTrade(-1, "TICK_MOMENTUM_SELL");
+         ExecuteTrade(1, "BUY_IMBALANCE");
          return;
       }
    }
    
-   // SIGNAL 2: LIQUIDITY SWEEP ON TICKS
-   int sweep = CheckTickSweep();
-   
-   if(sweep != 0 && IsTickVolumeSpike())
+   //================================================
+   // SIGNAL 2: STRONG SELLING IMBALANCE
+   // Sellers are aggressive - price will go down
+   //================================================
+   if(imbalance < -InpImbalanceRatio / 10.0 && price_move < 0)
    {
-      if(sweep == 1)
+      if(DetectAbsorption(-1))
       {
-         ExecuteTrade(1, "TICK_SWEEP_BUY");
-         return;
-      }
-      else if(sweep == -1)
-      {
-         ExecuteTrade(-1, "TICK_SWEEP_SELL");
+         ExecuteTrade(-1, "SELL_IMBALANCE");
          return;
       }
    }
    
-   // SIGNAL 3: VOLUME SPIKE + PRICE SURGE
-   if(IsTickVolumeSpike())
+   //================================================
+   // SIGNAL 3: ABSORPTION + BREAKOUT
+   // Market maker absorbing then price breaks
+   //================================================
+   if(tick_count >= InpAbsorptionTicks + 3)
    {
-      double recent_change = 0;
-      if(tick_count >= 3)
+      double old_price = tick_buffer[tick_count - InpAbsorptionTicks - 3].bid;
+      double new_price = current_tick.bid;
+      double move_pips = (new_price - old_price) / pip_size;
+      
+      if(DetectAbsorption(1) && move_pips > InpMinPriceMove && imbalance > 0)
       {
-         recent_change = (tick_buffer[tick_count - 1].bid - tick_buffer[tick_count - 3].bid) / pip_size;
+         ExecuteTrade(1, "ABSORPTION_BREAK");
+         return;
       }
       
-      if(recent_change > InpMinTickMomentum)
+      if(DetectAbsorption(-1) && move_pips < -InpMinPriceMove && imbalance < 0)
       {
-         ExecuteTrade(1, "VOL_SURGE_BUY");
-         return;
-      }
-      else if(recent_change < -InpMinTickMomentum)
-      {
-         ExecuteTrade(-1, "VOL_SURGE_SELL");
+         ExecuteTrade(-1, "ABSORPTION_BREAK");
          return;
       }
    }
    
-   // SIGNAL 4: REVERSAL AFTER SWEEP (HIGH PROBABILITY)
-   double swing_high = 0, swing_low = 999999;
-   DetectTickSwings(swing_high, swing_low);
-   
-   if(swing_low < 999999 && current_tick.bid < swing_low && tick_count >= 2)
+   //================================================
+   // SIGNAL 4: QUICK SCALP - Tick momentum
+   //================================================
+   if(tick_count >= 3)
    {
-      // Price just broke below swing low - wait for reversal
-      if(tick_buffer[tick_count - 2].bid < swing_low && current_tick.bid > tick_buffer[tick_count - 2].bid)
+      double tick1 = tick_buffer[tick_count - 3].bid;
+      double tick3 = current_tick.bid;
+      double momentum = (tick3 - tick1) / pip_size;
+      
+      if(momentum >= InpMinPriceMove && imbalance > 0)
       {
-         ExecuteTrade(1, "REVERSAL_BUY");
+         ExecuteTrade(1, "TICK_MOMENTUM");
          return;
       }
-   }
-   
-   if(swing_high > 0 && current_tick.ask > swing_high && tick_count >= 2)
-   {
-      // Price just broke above swing high - wait for reversal
-      if(tick_buffer[tick_count - 2].ask > swing_high && current_tick.ask < tick_buffer[tick_count - 2].ask)
+      
+      if(momentum <= -InpMinPriceMove && imbalance < 0)
       {
-         ExecuteTrade(-1, "REVERSAL_SELL");
+         ExecuteTrade(-1, "TICK_MOMENTUM");
          return;
       }
    }
