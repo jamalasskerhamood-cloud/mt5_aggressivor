@@ -1,9 +1,9 @@
 //+------------------------------------------------------------------+
-//|          QuantumShield_MOMENTUM_SCALPER_PROFIT.mq5              |
-//|            HIGH WIN RATE + SMALL LOSSES + QUICK PROFITS         |
+//|          QuantumShield_AGGRESSIVE_SCALPER_PROFIT.mq5             |
+//|            ULTRA AGGRESSIVE + TIGHT STOPS + ACTIVE TRADING       |
 //+------------------------------------------------------------------+
-#property copyright "Proven Scalping Strategy"
-#property version   "27.00"
+#property copyright "Aggressive Scalping Strategy"
+#property version   "28.00"
 #property strict
 
 #include <Trade/Trade.mqh>
@@ -11,39 +11,28 @@
 
 input double InpLotSize              = 0.05;
 
-// TIGHT EXITS - Small losses, small wins, high win rate
-input double InpTakeProfitPips       = 5.0;     // Quick 5 pip profit
-input double InpStopLossPips         = 3.0;     // Tighter stop than target
+// TIGHT EXITS - Keep this protection
+input double InpTakeProfitPips       = 5.0;
+input double InpStopLossPips         = 4.0;
 
-// ENTRY FILTERS - Only high probability setups
-input int    InpFastMA               = 5;       // Fast EMA
-input int    InpSlowMA               = 20;      // Slow EMA
-input int    InpRSIPeriod            = 7;       // Short RSI for scalping
-input double InpMinMomentum          = 0.2;     // Minimum price momentum
+// MINIMAL FILTERS - Just enough to avoid suicide
+input int    InpMaxSpread            = 30;      // 3 pips - wider to allow more trades
+input int    InpRSIPeriod            = 7;
 
-// MARKET CONDITIONS
-input int    InpMaxSpread            = 15;      // Max 1.5 pips
-input int    InpMinVolume            = 10;      // Minimum tick volume
-
-// RISK MANAGEMENT
-input int    InpMaxPositions         = 1;
-input int    InpMaxDailyTrades       = 20;      // Max trades per day
-input double InpDailyProfitTarget    = 10.0;    // Stop after $10 profit
-input double InpDailyLossLimit       = -8.0;    // Stop after -$8 loss
-input int    InpCooldownMinutes      = 2;       // Wait between trades
+// AGGRESSIVE SETTINGS
+input int    InpMaxPositions         = 2;       // Allow 2 positions
+input int    InpCooldownSeconds      = 30;      // Only 30 seconds between trades
+input bool   InpTradeAgainstTrend    = true;    // Trade both directions
 
 input ulong  InpMagic                = 909090;
 
 CTrade        trade;
 CPositionInfo pos_info;
 
-int fast_ma_handle, slow_ma_handle, rsi_handle;
-
-// Trading statistics
-int daily_trades = 0;
-double daily_pnl = 0;
+int rsi_handle;
 datetime last_trade_time = 0;
-datetime current_day = 0;
+int trades_this_minute = 0;
+datetime current_minute = 0;
 
 //====================================================
 // INIT
@@ -51,26 +40,18 @@ datetime current_day = 0;
 int OnInit()
 {
    trade.SetExpertMagicNumber(InpMagic);
-   trade.SetDeviationInPoints(10);
+   trade.SetDeviationInPoints(20);
    trade.SetAsyncMode(false);
    
-   fast_ma_handle = iMA(_Symbol, PERIOD_M1, InpFastMA, 0, MODE_EMA, PRICE_CLOSE);
-   slow_ma_handle = iMA(_Symbol, PERIOD_M1, InpSlowMA, 0, MODE_EMA, PRICE_CLOSE);
    rsi_handle = iRSI(_Symbol, PERIOD_M1, InpRSIPeriod, PRICE_CLOSE);
    
-   if(fast_ma_handle == INVALID_HANDLE || slow_ma_handle == INVALID_HANDLE || rsi_handle == INVALID_HANDLE)
-   {
-      Print("❌ INDICATOR INIT FAILED");
-      return(INIT_FAILED);
-   }
-   
-   current_day = TimeCurrent() / 86400;
-   
    Print("═══════════════════════════════════════");
-   Print("⚡ MOMENTUM SCALPER LOADED");
+   Print("⚡ AGGRESSIVE SCALPER LOADED");
    Print("TP: ", InpTakeProfitPips, " pips | SL: ", InpStopLossPips, " pips");
-   Print("Risk:Reward = 1:", InpTakeProfitPips/InpStopLossPips);
-   Print("Daily Limit: ", InpMaxDailyTrades, " trades");
+   Print("Max Spread: ", InpMaxSpread, " points");
+   Print("Max Positions: ", InpMaxPositions);
+   Print("Cooldown: ", InpCooldownSeconds, " seconds");
+   Print("Trade Against Trend: ", InpTradeAgainstTrend ? "YES" : "NO");
    Print("═══════════════════════════════════════");
    
    return(INIT_SUCCEEDED);
@@ -81,94 +62,7 @@ int OnInit()
 //====================================================
 void OnDeinit(const int reason)
 {
-   if(fast_ma_handle != INVALID_HANDLE) IndicatorRelease(fast_ma_handle);
-   if(slow_ma_handle != INVALID_HANDLE) IndicatorRelease(slow_ma_handle);
    if(rsi_handle != INVALID_HANDLE) IndicatorRelease(rsi_handle);
-}
-
-//====================================================
-// GET INDICATORS
-//====================================================
-bool GetIndicators(double &fast_ma, double &slow_ma, double &rsi)
-{
-   double fast_arr[1], slow_arr[1], rsi_arr[1];
-   
-   if(CopyBuffer(fast_ma_handle, 0, 0, 1, fast_arr) <= 0) return false;
-   if(CopyBuffer(slow_ma_handle, 0, 0, 1, slow_arr) <= 0) return false;
-   if(CopyBuffer(rsi_handle, 0, 0, 1, rsi_arr) <= 0) return false;
-   
-   fast_ma = fast_arr[0];
-   slow_ma = slow_arr[0];
-   rsi = rsi_arr[0];
-   
-   return true;
-}
-
-//====================================================
-// POSITION MANAGEMENT
-//====================================================
-void ManagePosition(MqlTick &tick)
-{
-   if(CountPositions() == 0) return;
-   
-   for(int i = PositionsTotal()-1; i >= 0; i--)
-   {
-      if(pos_info.SelectByIndex(i))
-      {
-         if(pos_info.Symbol() == _Symbol && pos_info.Magic() == (long)InpMagic)
-         {
-            double net_profit = pos_info.Profit() + pos_info.Swap() + pos_info.Commission();
-            double open_price = pos_info.PriceOpen();
-            ENUM_POSITION_TYPE type = (ENUM_POSITION_TYPE)pos_info.PositionType();
-            
-            // Calculate pips in profit
-            double pips_profit = 0;
-            if(type == POSITION_TYPE_BUY)
-               pips_profit = (tick.bid - open_price) / GetPipSize();
-            else
-               pips_profit = (open_price - tick.ask) / GetPipSize();
-            
-            //================================================
-            // QUICK EXIT: At 3 pips profit, move SL to breakeven
-            //================================================
-            if(pips_profit >= 3.0)
-            {
-               double breakeven_sl = open_price;
-               if(type == POSITION_TYPE_BUY)
-                  breakeven_sl = open_price + GetPipSize(); // +1 pip buffer
-               else
-                  breakeven_sl = open_price - GetPipSize();
-               
-               if(pos_info.StopLoss() != breakeven_sl)
-               {
-                  trade.PositionModify(pos_info.Ticket(), breakeven_sl, pos_info.TakeProfit());
-               }
-            }
-            
-            //================================================
-            // TRAILING STOP: At 4 pips, trail with 2 pip stop
-            //================================================
-            if(pips_profit >= 4.0)
-            {
-               double trail_sl = 0;
-               double trail_distance = GetPipSize() * 2.0; // 2 pip trail
-               
-               if(type == POSITION_TYPE_BUY)
-                  trail_sl = tick.bid - trail_distance;
-               else
-                  trail_sl = tick.ask + trail_distance;
-               
-               if((type == POSITION_TYPE_BUY && trail_sl > pos_info.StopLoss()) ||
-                  (type == POSITION_TYPE_SELL && trail_sl < pos_info.StopLoss()))
-               {
-                  trade.PositionModify(pos_info.Ticket(), trail_sl, pos_info.TakeProfit());
-               }
-            }
-            
-            break;
-         }
-      }
-   }
 }
 
 //====================================================
@@ -201,17 +95,79 @@ double GetPipSize()
 }
 
 //====================================================
-// RESET DAILY STATS
+// POSITION MANAGEMENT
 //====================================================
-void CheckNewDay()
+void ManagePositions(MqlTick &tick)
 {
-   datetime new_day = TimeCurrent() / 86400;
-   if(new_day != current_day)
+   for(int i = PositionsTotal()-1; i >= 0; i--)
    {
-      daily_trades = 0;
-      daily_pnl = 0;
-      current_day = new_day;
-      Print("📅 NEW DAY - Stats Reset");
+      if(!pos_info.SelectByIndex(i))
+         continue;
+      if(pos_info.Symbol() != _Symbol)
+         continue;
+      if(pos_info.Magic() != (long)InpMagic)
+         continue;
+      
+      double net_profit = pos_info.Profit() + pos_info.Swap() + pos_info.Commission();
+      double open_price = pos_info.PriceOpen();
+      double current_sl = pos_info.StopLoss();
+      ENUM_POSITION_TYPE type = (ENUM_POSITION_TYPE)pos_info.PositionType();
+      
+      // Calculate pips profit
+      double pips_profit = 0;
+      if(type == POSITION_TYPE_BUY)
+         pips_profit = (tick.bid - open_price) / GetPipSize();
+      else
+         pips_profit = (open_price - tick.ask) / GetPipSize();
+      
+      //================================================
+      // BREAKEVEN AT 3 PIPS
+      //================================================
+      if(pips_profit >= 3.0 && current_sl != open_price)
+      {
+         double breakeven_sl = open_price;
+         if(type == POSITION_TYPE_BUY)
+            breakeven_sl = open_price + (GetPipSize() * 0.5); // +0.5 pip buffer
+         else
+            breakeven_sl = open_price - (GetPipSize() * 0.5);
+         
+         trade.PositionModify(pos_info.Ticket(), breakeven_sl, pos_info.TakeProfit());
+      }
+      
+      //================================================
+      // TRAILING STOP AT 4 PIPS
+      //================================================
+      if(pips_profit >= 4.0)
+      {
+         double trail_distance = GetPipSize() * 2.0; // 2 pip trail
+         double trail_sl = 0;
+         
+         if(type == POSITION_TYPE_BUY)
+            trail_sl = tick.bid - trail_distance;
+         else
+            trail_sl = tick.ask + trail_distance;
+         
+         if((type == POSITION_TYPE_BUY && trail_sl > current_sl) ||
+            (type == POSITION_TYPE_SELL && trail_sl < current_sl))
+         {
+            trade.PositionModify(pos_info.Ticket(), trail_sl, pos_info.TakeProfit());
+         }
+      }
+      
+      //================================================
+      // CLOSE IF REVERSING (protect tiny profits)
+      //================================================
+      if(net_profit > 0.02 && net_profit < 0.10)
+      {
+         // Close if price moved 2 pips against us from peak
+         double peak_distance = (pips_profit >= 2.0) ? pips_profit - 2.0 : 0;
+         if(peak_distance <= 0.5)
+         {
+            Print("🛡️ PROTECTIVE CLOSE | Profit: $", DoubleToString(net_profit, 3));
+            trade.PositionClose(pos_info.Ticket());
+            continue;
+         }
+      }
    }
 }
 
@@ -220,16 +176,6 @@ void CheckNewDay()
 //====================================================
 void OnTick()
 {
-   CheckNewDay();
-   
-   // Stop trading if daily limits hit
-   if(daily_trades >= InpMaxDailyTrades)
-      return;
-   if(daily_pnl >= InpDailyProfitTarget)
-      return;
-   if(daily_pnl <= InpDailyLossLimit)
-      return;
-   
    if(!TerminalInfoInteger(TERMINAL_TRADE_ALLOWED))
       return;
    
@@ -237,107 +183,125 @@ void OnTick()
    if(!SymbolInfoTick(_Symbol, current_tick))
       return;
    
-   // Manage existing position
-   ManagePosition(current_tick);
+   // Manage positions
+   ManagePositions(current_tick);
    
+   // Reset trades per minute counter
+   if(TimeCurrent() / 60 != current_minute / 60)
+   {
+      trades_this_minute = 0;
+      current_minute = TimeCurrent();
+   }
+   
+   // Check max positions
    if(CountPositions() >= InpMaxPositions)
       return;
    
-   // Cooldown between trades
-   if(TimeCurrent() - last_trade_time < InpCooldownMinutes * 60)
+   // Limit trades per minute (max 4 per minute)
+   if(trades_this_minute >= 4)
       return;
    
-   // Check spread
+   // Short cooldown
+   if(TimeCurrent() - last_trade_time < InpCooldownSeconds)
+      return;
+   
+   // Check spread - WIDER tolerance
    int spread = (int)SymbolInfoInteger(_Symbol, SYMBOL_SPREAD);
    if(spread > InpMaxSpread)
       return;
    
-   // Check tick volume (liquidity)
-   long tick_volume = SymbolInfoInteger(_Symbol, SYMBOL_VOLUME);
-   if(tick_volume < InpMinVolume)
-      return;
-   
-   // Get indicators
-   double fast_ma, slow_ma, rsi;
-   if(!GetIndicators(fast_ma, slow_ma, rsi))
-      return;
+   // Get RSI
+   double rsi_arr[1];
+   double rsi = 50; // Default neutral
+   if(CopyBuffer(rsi_handle, 0, 0, 1, rsi_arr) > 0)
+      rsi = rsi_arr[0];
    
    double pip_size = GetPipSize();
-   double sl_price = InpStopLossPips * pip_size;
-   double tp_price = InpTakeProfitPips * pip_size;
+   double sl_distance = InpStopLossPips * pip_size;
+   double tp_distance = InpTakeProfitPips * pip_size;
    
-   // Ensure minimum stop distances
-   double min_distance = SymbolInfoInteger(_Symbol, SYMBOL_TRADE_STOPS_LEVEL) * SymbolInfoDouble(_Symbol, SYMBOL_POINT) * 2;
-   if(sl_price < min_distance) sl_price = min_distance;
-   if(tp_price < min_distance) tp_price = min_distance;
+   // Ensure minimum distances
+   double min_stops = SymbolInfoInteger(_Symbol, SYMBOL_TRADE_STOPS_LEVEL) * SymbolInfoDouble(_Symbol, SYMBOL_POINT);
+   if(sl_distance < min_stops) sl_distance = min_stops * 1.5;
+   if(tp_distance < min_stops) tp_distance = min_stops * 1.5;
    
    //================================================
-   // BUY SIGNAL: Fast MA > Slow MA + RSI 40-60 + Pullback
+   // PRICE MOMENTUM - The trigger
    //================================================
-   bool trend_up = (fast_ma > slow_ma);
-   bool rsi_zone = (rsi >= 40 && rsi <= 60);
-   bool pullback = (current_tick.bid <= fast_ma && current_tick.bid > slow_ma);
+   static double last_bid = 0;
+   static double last_ask = 0;
    
-   if(trend_up && rsi_zone && pullback)
+   if(last_bid == 0)
    {
-      double sl = current_tick.bid - sl_price;
-      double tp = current_tick.bid + tp_price;
+      last_bid = current_tick.bid;
+      last_ask = current_tick.ask;
+      return;
+   }
+   
+   double bid_change = current_tick.bid - last_bid;
+   double ask_change = current_tick.ask - last_ask;
+   
+   //================================================
+   // BUY SIGNAL - Any upward movement
+   //================================================
+   bool buy_signal = false;
+   
+   // SIMPLE: Price moving up
+   if(bid_change > 0 && InpTradeAgainstTrend)
+      buy_signal = true;
+   
+   // With RSI filter (not overbought)
+   if(bid_change > 0 && rsi < 65)
+      buy_signal = true;
+   
+   if(buy_signal)
+   {
+      double sl = current_tick.bid - sl_distance;
+      double tp = current_tick.bid + tp_distance;
       
-      if(trade.Buy(InpLotSize, _Symbol, 0, sl, tp, "SCALP_BUY"))
+      if(trade.Buy(InpLotSize, _Symbol, 0, sl, tp, "AGGRO_BUY"))
       {
-         Print("🟢 BUY | Price: ", current_tick.bid, " | SL: ", sl, " | TP: ", tp);
-         daily_trades++;
+         Print("🟢 BUY | Bid: ", current_tick.bid, 
+               " | Change: ", DoubleToString(bid_change/GetPipSize(), 1), " pips",
+               " | RSI: ", DoubleToString(rsi, 1),
+               " | SL: ", DoubleToString(sl, 5),
+               " | TP: ", DoubleToString(tp, 5));
+         trades_this_minute++;
          last_trade_time = TimeCurrent();
-         UpdateDailyPNL();
       }
    }
    
    //================================================
-   // SELL SIGNAL: Fast MA < Slow MA + RSI 40-60 + Rally
+   // SELL SIGNAL - Any downward movement
    //================================================
-   bool trend_down = (fast_ma < slow_ma);
-   bool rally = (current_tick.ask >= fast_ma && current_tick.ask < slow_ma);
+   bool sell_signal = false;
    
-   if(trend_down && rsi_zone && rally)
+   // SIMPLE: Price moving down
+   if(ask_change < 0 && InpTradeAgainstTrend)
+      sell_signal = true;
+   
+   // With RSI filter (not oversold)
+   if(ask_change < 0 && rsi > 35)
+      sell_signal = true;
+   
+   if(sell_signal)
    {
-      double sl = current_tick.ask + sl_price;
-      double tp = current_tick.ask - tp_price;
+      double sl = current_tick.ask + sl_distance;
+      double tp = current_tick.ask - tp_distance;
       
-      if(trade.Sell(InpLotSize, _Symbol, 0, sl, tp, "SCALP_SELL"))
+      if(trade.Sell(InpLotSize, _Symbol, 0, sl, tp, "AGGRO_SELL"))
       {
-         Print("🔴 SELL | Price: ", current_tick.ask, " | SL: ", sl, " | TP: ", tp);
-         daily_trades++;
+         Print("🔴 SELL | Ask: ", current_tick.ask, 
+               " | Change: ", DoubleToString(ask_change/GetPipSize(), 1), " pips",
+               " | RSI: ", DoubleToString(rsi, 1),
+               " | SL: ", DoubleToString(sl, 5),
+               " | TP: ", DoubleToString(tp, 5));
+         trades_this_minute++;
          last_trade_time = TimeCurrent();
-         UpdateDailyPNL();
       }
    }
-}
-
-//====================================================
-// UPDATE DAILY PNL
-//====================================================
-void UpdateDailyPNL()
-{
-   daily_pnl = 0;
-   for(int i = PositionsTotal()-1; i >= 0; i--)
-   {
-      if(pos_info.SelectByIndex(i))
-         if(pos_info.Symbol() == _Symbol && pos_info.Magic() == (long)InpMagic)
-            daily_pnl += pos_info.Profit() + pos_info.Swap() + pos_info.Commission();
-   }
    
-   // Also check history for closed trades today
-   HistorySelect(TimeCurrent() - 86400, TimeCurrent());
-   for(int i = HistoryDealsTotal()-1; i >= 0; i--)
-   {
-      ulong ticket = HistoryDealGetTicket(i);
-      if(HistoryDealGetInteger(ticket, DEAL_MAGIC) == InpMagic)
-         daily_pnl += HistoryDealGetDouble(ticket, DEAL_PROFIT);
-   }
-   
-   if(daily_pnl >= InpDailyProfitTarget)
-      Print("🎯 DAILY PROFIT TARGET HIT: $", DoubleToString(daily_pnl, 2));
-   else if(daily_pnl <= InpDailyLossLimit)
-      Print("⛔ DAILY LOSS LIMIT HIT: $", DoubleToString(daily_pnl, 2));
+   last_bid = current_tick.bid;
+   last_ask = current_tick.ask;
 }
 //+------------------------------------------------------------------+
