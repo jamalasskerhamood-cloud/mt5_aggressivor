@@ -1,6 +1,4 @@
-FROM python:3.11-slim-bookworm
-
-USER root
+FROM ubuntu:22.04
 
 ENV DEBIAN_FRONTEND=noninteractive
 ENV DISPLAY=:1
@@ -8,72 +6,112 @@ ENV WINEPREFIX=/root/.wine
 ENV WINEARCH=win64
 ENV WINEDEBUG=-all
 
-RUN dpkg --add-architecture i386 && apt-get update && apt-get install -y --no-install-recommends \
-    wine wine64 wine32:i386 winbind xvfb fluxbox x11vnc novnc websockify \
-    wget curl procps cabextract unzip dos2unix xdotool \
-    && apt-get clean && rm -rf /var/lib/apt/lists/*
+# ==========================================
+# INSTALL SYSTEM + GUI + WINE
+# ==========================================
+RUN dpkg --add-architecture i386 && \
+    apt-get update && \
+    apt-get install -y \
+    wget \
+    curl \
+    unzip \
+    supervisor \
+    xfce4 \
+    xfce4-goodies \
+    xrdp \
+    dbus-x11 \
+    xvfb \
+    net-tools \
+    software-properties-common \
+    cabextract \
+    wine64 \
+    wine32 \
+    winbind \
+    openjdk-11-jdk \
+    tomcat9 \
+    postgresql \
+    postgresql-contrib \
+    && rm -rf /var/lib/apt/lists/*
 
-RUN pip install --no-cache-dir mt5linux rpyc
+# ==========================================
+# INSTALL GUACD
+# ==========================================
+RUN apt-get update && apt-get install -y \
+    guacd \
+    libguac-client-rdp0 \
+    libguac-client-vnc0 \
+    libguac-client-ssh0
 
-RUN wget -q https://download.mql5.com/cdn/web/metaquotes.software.corp/mt5/mt5setup.exe \
-    -O /root/mt5setup.exe
+# ==========================================
+# DOWNLOAD GUACAMOLE WAR
+# ==========================================
+RUN wget https://archive.apache.org/dist/guacamole/1.5.5/binary/guacamole-1.5.5.war \
+    -O /var/lib/tomcat9/webapps/guacamole.war
 
-# Copy EA files
-COPY ["test.mq5", "/root/test.mq5"]
+# ==========================================
+# CREATE GUACAMOLE CONFIG
+# ==========================================
+RUN mkdir -p /etc/guacamole
 
+RUN echo "guacd-hostname: localhost" > /etc/guacamole/guacamole.properties && \
+    echo "guacd-port: 4822" >> /etc/guacamole/guacamole.properties
 
+# ==========================================
+# INSTALL MT5
+# ==========================================
+RUN mkdir -p /mt5
 
-RUN cat > /entrypoint.sh <<EOF
-#!/bin/bash
-set -e
+RUN wget https://download.mql5.com/cdn/web/metaquotes.software.corp/mt5/mt5setup.exe \
+    -O /mt5/mt5setup.exe
 
-rm -rf /tmp/.X*
+RUN wineboot --init || true
+RUN sleep 15
 
-Xvfb :1 -screen 0 1280x1024x24 -ac &
-sleep 2
+RUN xvfb-run wine /mt5/mt5setup.exe /silent || true
+RUN sleep 25
 
-fluxbox &
+# ==========================================
+# COPY YOUR EA
+# ==========================================
+COPY test.mq5 /root/.wine/drive_c/Program\ Files/MetaTrader\ 5/MQL5/Experts/test.mq5
 
-x11vnc -display :1 -forever -shared -nopw -rfbport 5900 &
+# ==========================================
+# XRDP CONFIG
+# ==========================================
+RUN echo "xfce4-session" > /root/.xsession
 
-websockify --web=/usr/share/novnc 8080 0.0.0.0:5900 &
+RUN adduser xrdp ssl-cert
 
-wineboot --init
-sleep 5
+# ==========================================
+# START SCRIPT
+# ==========================================
+RUN echo '#!/bin/bash
+\
+service dbus start
+\
+service postgresql start
+\
+service xrdp start
+\
+service tomcat9 start
+\
+/usr/sbin/guacd -f &
+\
+Xvfb :1 -screen 0 1280x720x16 &
+\
+export DISPLAY=:1
+\
+wine "/root/.wine/drive_c/Program Files/MetaTrader 5/terminal64.exe" &
+\
+tail -f /dev/null' > /start.sh
 
-MT5_EXE="/root/.wine/drive_c/Program Files/MetaTrader 5/terminal64.exe"
+RUN chmod +x /start.sh
 
-if [ ! -f "\$MT5_EXE" ]; then
-    wine /root/mt5setup.exe /auto
-    sleep 90
-fi
+# ==========================================
+# PORTS
+# ==========================================
+EXPOSE 8080
+EXPOSE 3389
+EXPOSE 4822
 
-wine "\$MT5_EXE" &
-sleep 30
-
-DATA_DIR=\$(find /root/.wine -type d -path "*MetaQuotes/Terminal/*/MQL5" | head -n 1)
-
-if [ -z "\$DATA_DIR" ]; then
-    DATA_DIR="/root/.wine/drive_c/Program Files/MetaTrader 5/MQL5"
-fi
-
-mkdir -p "\$DATA_DIR/Experts"
-
-cp "/root/test.mq5" "\$DATA_DIR/Experts/"
-
-
-
-echo "✅ Copied EAs to \$DATA_DIR/Experts/"
-
-ls -la "\$DATA_DIR/Experts/"
-
-python3 -m mt5linux --host 0.0.0.0 --port 8001 &
-
-tail -f /dev/null
-EOF
-
-RUN chmod +x /entrypoint.sh && dos2unix /entrypoint.sh
-
-EXPOSE 8080 8001
-
-CMD ["/bin/bash", "/entrypoint.sh"]
+CMD ["/start.sh"]
