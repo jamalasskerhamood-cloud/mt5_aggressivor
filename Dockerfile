@@ -1,82 +1,55 @@
-FROM lscr.io/linuxserver/webtop:ubuntu-xfce
+FROM ubuntu:22.04
 
 ENV DEBIAN_FRONTEND=noninteractive
-ENV TITLE=MT5
-ENV DISPLAY=:1
-ENV WINEPREFIX=/config/.wine
+ENV DISPLAY=:99
+ENV WINEPREFIX=/root/.wine
 ENV WINEARCH=win64
 ENV WINEDEBUG=-all
 
 # ============================================
-# INSTALL DEPENDENCIES
+# INSTALL ONLY REQUIRED PACKAGES
 # ============================================
 RUN dpkg --add-architecture i386 && \
     apt-get update && \
     apt-get install -y \
     wget \
     curl \
-    unzip \
     xvfb \
-    cabextract \
-    winbind \
-    p7zip-full \
     wine64 \
-    wine32 && \
+    wine32 \
+    cabextract \
+    unzip && \
     rm -rf /var/lib/apt/lists/*
 
 # ============================================
-# CREATE DIRECTORIES
+# CREATE WORKDIR
 # ============================================
-RUN mkdir -p /mt5
-
-RUN mkdir -p "/config/.wine/drive_c/Program Files/MetaTrader 5/MQL5/Experts"
+WORKDIR /app
 
 # ============================================
-# DOWNLOAD MT5
+# COPY EA
 # ============================================
-RUN wget -O /mt5/mt5setup.exe \
-https://download.mql5.com/cdn/web/metaquotes.software.corp/mt5/mt5setup.exe
+COPY test.mq5 /app/test.mq5
 
 # ============================================
-# INIT WINE
+# START SCRIPT
 # ============================================
-RUN wineboot --init || true
-
-RUN sleep 15
-
-# ============================================
-# INSTALL MT5
-# ============================================
-RUN xvfb-run wine /mt5/mt5setup.exe /silent || true
-
-RUN sleep 20
-
-# ============================================
-# COPY EA (THIS IS THE FIX)
-# ============================================
-COPY ["test.mq5", "/config/.wine/drive_c/Program Files/MetaTrader 5/MQL5/Experts/test.mq5"]
-
-# ============================================
-# AUTOSTART MT5
-# ============================================
-RUN mkdir -p /config/.config/autostart
-
-RUN printf '%s\n' \
-'[Desktop Entry]' \
-'Type=Application' \
-'Exec=wine "/config/.wine/drive_c/Program Files/MetaTrader 5/terminal64.exe"' \
-'Hidden=false' \
-'NoDisplay=false' \
-'X-GNOME-Autostart-enabled=true' \
-'Name=MT5' \
-> /config/.config/autostart/mt5.desktop
+RUN printf '#!/bin/bash\n\
+Xvfb :99 -screen 0 1024x768x16 &\n\
+sleep 5\n\
+wineboot --init\n\
+sleep 10\n\
+mkdir -p "/root/.wine/drive_c/MT5"\n\
+cd /root/.wine/drive_c/MT5\n\
+wget -O mt5setup.exe https://download.mql5.com/cdn/web/metaquotes.software.corp/mt5/mt5setup.exe\n\
+wine mt5setup.exe /silent || true\n\
+sleep 20\n\
+find /root/.wine -type d -name Experts | head -1 | xargs -I {} cp /app/test.mq5 "{}/test.mq5"\n\
+while true; do sleep 3600; done\n' > /start.sh && chmod +x /start.sh
 
 # ============================================
 # PORT
 # ============================================
-EXPOSE 3000
+EXPOSE 8080
 
-# ============================================
-# HEALTHCHECK
-# ============================================
-HEALTHCHECK CMD pgrep wineserver || exit 1
+CMD ["/start.sh"]
