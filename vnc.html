@@ -1,0 +1,169 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=yes">
+    <title>MT5 VNC Client</title>
+    <style>
+        body {
+            margin: 0;
+            padding: 0;
+            overflow: hidden;
+            background: #1a1a1a;
+        }
+        #vnc_container {
+            position: absolute;
+            top: 0;
+            left: 0;
+            width: 100%;
+            height: 100%;
+        }
+        canvas {
+            width: 100% !important;
+            height: 100% !important;
+            object-fit: contain;
+        }
+        .controls {
+            position: fixed;
+            bottom: 20px;
+            right: 20px;
+            z-index: 1000;
+            background: rgba(0,0,0,0.7);
+            padding: 10px;
+            border-radius: 5px;
+            color: white;
+            font-family: Arial, sans-serif;
+        }
+        button {
+            background: #4CAF50;
+            color: white;
+            border: none;
+            padding: 5px 10px;
+            margin: 2px;
+            cursor: pointer;
+            border-radius: 3px;
+        }
+        button:hover {
+            background: #45a049;
+        }
+        @media (max-width: 768px) {
+            .controls {
+                bottom: 10px;
+                right: 10px;
+                font-size: 12px;
+            }
+            button {
+                padding: 8px 12px;
+                font-size: 14px;
+            }
+        }
+    </style>
+</head>
+<body>
+    <div id="vnc_container"></div>
+    <div class="controls">
+        <button onclick="document.getElementById('vnc_container').requestFullscreen()">Fullscreen</button>
+        <button onclick="window.location.reload()">Refresh</button>
+        <button onclick="window.location.href='/vnc.html?autoconnect=1&resize=remote'">Reconnect</button>
+    </div>
+
+    <script>
+        // Ensure all required elements exist before noVNC loads
+        (function ensureElements() {
+            const requiredIds = [
+                'noVNC_clipboard_button',
+                'noVNC_clipboard_clear_button',
+                'noVNC_settings_button',
+                'noVNC_connect_button',
+                'clipboardButton',
+                'clipboardClearButton'
+            ];
+            
+            requiredIds.forEach(id => {
+                if (!document.getElementById(id)) {
+                    const element = document.createElement('div');
+                    element.id = id;
+                    element.style.display = 'none';
+                    document.body.appendChild(element);
+                }
+            });
+        })();
+
+        function initVNC() {
+            const params = new URLSearchParams(window.location.search);
+            const autoconnect = params.get('autoconnect') !== 'false';
+            const resize = params.get('resize') || 'remote';
+            
+            const container = document.getElementById('vnc_container');
+            
+            // Show loading message
+            container.innerHTML = '<div style="color: white; padding: 20px; text-align: center;">Connecting to VNC...</div>';
+            
+            // Get the WebSocket URL
+            const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
+            const wsUrl = `${protocol}//${window.location.hostname}:8080/websockify`;
+            
+            // Wait for RFB to be available
+            function connect() {
+                if (typeof RFB === 'undefined') {
+                    setTimeout(connect, 100);
+                    return;
+                }
+                
+                try {
+                    const rfb = new RFB(container, wsUrl, {
+                        credentials: { password: '' },
+                        shared: true,
+                        view_only: false,
+                        resizeSession: resize === 'remote'
+                    });
+                    
+                    rfb.addEventListener('connect', () => {
+                        console.log('VNC connected');
+                        container.innerHTML = '';
+                    });
+                    
+                    rfb.addEventListener('disconnect', (e) => {
+                        console.log('Disconnected:', e.detail.reason);
+                        if (autoconnect) {
+                            container.innerHTML = '<div style="color: white; padding: 20px; text-align: center;">Disconnected. Reconnecting...</div>';
+                            setTimeout(connect, 3000);
+                        } else {
+                            container.innerHTML = `<div style="color: white; padding: 20px; text-align: center;">Disconnected: ${e.detail.reason}</div>`;
+                        }
+                    });
+                    
+                    rfb.addEventListener('securityfailure', (e) => {
+                        console.error('Security failure:', e.detail.reason);
+                        container.innerHTML = `<div style="color: red; padding: 20px; text-align: center;">Security failure: ${e.detail.reason}</div>`;
+                    });
+                    
+                } catch (error) {
+                    console.error('Connection error:', error);
+                    container.innerHTML = `<div style="color: red; padding: 20px; text-align: center;">Error: ${error.message}</div>`;
+                }
+            }
+            
+            // Load noVNC script
+            if (typeof RFB === 'undefined') {
+                const script = document.createElement('script');
+                script.src = '/novnc/app/rfb.js';
+                script.onload = connect;
+                script.onerror = () => {
+                    container.innerHTML = '<div style="color: red; padding: 20px; text-align: center;">Failed to load noVNC</div>';
+                };
+                document.head.appendChild(script);
+            } else {
+                connect();
+            }
+        }
+        
+        // Start when DOM is ready
+        if (document.readyState === 'loading') {
+            document.addEventListener('DOMContentLoaded', initVNC);
+        } else {
+            initVNC();
+        }
+    </script>
+</body>
+</html>
