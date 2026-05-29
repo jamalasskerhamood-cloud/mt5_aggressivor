@@ -1,6 +1,3 @@
-#latest chatgpt docker
-
-
 FROM python:3.11-slim-bookworm
 
 USER root
@@ -33,21 +30,7 @@ RUN git clone --depth 1 https://github.com/novnc/noVNC.git /opt/novnc && \
 # ============================================
 # FIX MOBILE addEventListener ERROR
 # ============================================
-# ============================================
-# FIX MOBILE addEventListener ERROR
-# ============================================
-RUN sed -i '/"use strict";/a \
-document.addEventListener("DOMContentLoaded", () => {\
-    ["noVNC_clipboard_button", "noVNC_clipboard_clear_button"].forEach(id => {\
-        if (!document.getElementById(id)) {\
-            const btn = document.createElement("button");\
-            btn.id = id;\
-            btn.style.display = "none";\
-            document.body.appendChild(btn);\
-        }\
-    });\
-});' /opt/novnc/app/ui.js
-
+RUN sed -i 's/UI.prototype._initEvents/UI.prototype._initEvents = function() { var that = this; ["clipboardButton", "clipboardClearButton"].forEach(function(id) { if (!document.getElementById(id)) { var btn = document.createElement("button"); btn.id = id; btn.style.display = "none"; document.body.appendChild(btn); } }); this._initEvents_original(); }; UI.prototype._initEvents_original = UI.prototype._initEvents; delete UI.prototype._initEvents; UI.prototype._initEvents/' /opt/novnc/app/ui.js
 
 # ============================================
 # PYTHON MT5 BRIDGE
@@ -64,7 +47,7 @@ https://download.mql5.com/cdn/web/metaquotes.software.corp/mt5/mt5setup.exe \
 # ============================================
 # COPY EA
 # ============================================
-COPY ["test.mq5", "/root/test.mq5"]
+COPY test.mq5 /root/test.mq5
 
 # ============================================
 # ENTRYPOINT
@@ -174,8 +157,7 @@ python3 -m mt5linux --host 0.0.0.0 --port 8001 &
 
 echo "======================================="
 echo "SYSTEM READY"
-echo "OPEN:"
-echo "/vnc.html?autoconnect=1&resize=remote"
+echo "OPEN: http://localhost:8080/vnc.html?autoconnect=1&resize=remote"
 echo "======================================="
 
 tail -f /dev/null
