@@ -7,7 +7,7 @@ ENV WINEARCH=win64
 ENV WINEDEBUG=-all
 
 # ============================================
-# INSTALL ONLY REQUIRED PACKAGES
+# INSTALL LIGHTWEIGHT DEPENDENCIES
 # ============================================
 RUN dpkg --add-architecture i386 && \
     apt-get update && \
@@ -18,11 +18,12 @@ RUN dpkg --add-architecture i386 && \
     wine64 \
     wine32 \
     cabextract \
-    unzip && \
+    unzip \
+    python3 && \
     rm -rf /var/lib/apt/lists/*
 
 # ============================================
-# CREATE WORKDIR
+# WORKDIR
 # ============================================
 WORKDIR /app
 
@@ -35,20 +36,39 @@ COPY test.mq5 /app/test.mq5
 # START SCRIPT
 # ============================================
 RUN printf '#!/bin/bash\n\
+set -e\n\
+\n\
+echo "Starting virtual display..."\n\
 Xvfb :99 -screen 0 1024x768x16 &\n\
+sleep 3\n\
+\n\
+echo "Initializing Wine..."\n\
+wineboot --init || true\n\
 sleep 5\n\
-wineboot --init\n\
-sleep 10\n\
-mkdir -p "/root/.wine/drive_c/MT5"\n\
-cd /root/.wine/drive_c/MT5\n\
-wget -O mt5setup.exe https://download.mql5.com/cdn/web/metaquotes.software.corp/mt5/mt5setup.exe\n\
+\n\
+mkdir -p /mt5\n\
+cd /mt5\n\
+\n\
+echo "Downloading MT5..."\n\
+wget -q -O mt5setup.exe https://download.mql5.com/cdn/web/metaquotes.software.corp/mt5/mt5setup.exe\n\
+\n\
+echo "Installing MT5..."\n\
 wine mt5setup.exe /silent || true\n\
-sleep 20\n\
-find /root/.wine -type d -name Experts | head -1 | xargs -I {} cp /app/test.mq5 "{}/test.mq5"\n\
-while true; do sleep 3600; done\n' > /start.sh && chmod +x /start.sh
+sleep 15\n\
+\n\
+echo "Copying EA..."\n\
+find /root/.wine -type d -name Experts | head -1 | xargs -I {} cp /app/test.mq5 "{}/test.mq5" || true\n\
+\n\
+echo "Starting lightweight web server..."\n\
+cd /app\n\
+echo "MT5 Aggressivor Running" > index.html\n\
+python3 -m http.server 8080 &\n\
+\n\
+echo "Container ready."\n\
+tail -f /dev/null\n' > /start.sh && chmod +x /start.sh
 
 # ============================================
-# PORT
+# EXPOSE PORT
 # ============================================
 EXPOSE 8080
 
