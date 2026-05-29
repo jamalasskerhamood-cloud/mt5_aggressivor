@@ -42,7 +42,8 @@ x11vnc -display :1 -forever -shared -nopw -rfbport 5900 &
 
 /opt/novnc/utils/novnc_proxy \
 --vnc localhost:5900 \
---listen 8080 &
+--listen 8080 \
+--heartbeat 30 &
 
 wineboot --init
 sleep 5
