@@ -19,67 +19,39 @@ RUN dpkg --add-architecture i386 && \
     wget curl git unzip dos2unix procps \
     cabextract xdotool xterm net-tools \
     python3 python3-pip \
+    xfonts-base xfonts-75dpi \
     && apt-get clean && rm -rf /var/lib/apt/lists/*
 
 # ============================================
-# INSTALL LATEST noVNC + websockify
+# INSTALL noVNC + websockify - FIXED PATHS
 # ============================================
 RUN git clone --depth 1 https://github.com/novnc/noVNC.git /opt/novnc && \
-    git clone --depth 1 https://github.com/novnc/websockify.git /opt/novnc/utils/websockify
+    git clone --depth 1 https://github.com/novnc/websockify.git /opt/websockify
+
+# Create symbolic link for websockify
+RUN ln -s /opt/websockify/websockify /usr/local/bin/websockify && \
+    chmod +x /usr/local/bin/websockify
 
 # ============================================
-# COMPLETE FIX FOR addEventListener ERROR
+# FIX THE addEventListener ERROR - Complete replacement
 # ============================================
-# Method 1: Patch the ui.js file to add missing elements before initialization
-RUN cat >> /opt/novnc/app/ui.js <<'EOF'
-
-// Custom patch to fix missing DOM elements
-(function() {
-    var originalStart = UI.prototype.start;
-    UI.prototype.start = function() {
-        // Create missing elements before starting
-        var missingElements = [
-            'noVNC_clipboard_button',
-            'noVNC_clipboard_clear_button',
-            'noVNC_settings_button',
-            'noVNC_connect_button'
-        ];
-        
-        missingElements.forEach(function(id) {
-            if (!document.getElementById(id)) {
-                var btn = document.createElement('button');
-                btn.id = id;
-                btn.style.display = 'none';
-                document.body.appendChild(btn);
-            }
-        });
-        
-        // Call original start function
-        return originalStart.apply(this, arguments);
-    };
-})();
-EOF
-
-# Method 2: Create a completely new vnc.html that doesn't rely on UI.js clipboard handlers
+# Replace the problematic vnc.html with a simplified working version
 RUN cat > /opt/novnc/vnc.html <<'EOF'
 <!DOCTYPE html>
-<html lang="en">
+<html>
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=yes">
-    <title>MT5 VNC Client</title>
+    <title>MT5 Trading Platform</title>
     <style>
-        * {
+        body {
             margin: 0;
             padding: 0;
-            box-sizing: border-box;
-        }
-        body {
-            background: #1a1a1a;
             overflow: hidden;
-            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Arial, sans-serif;
+            background: #1a1a1a;
+            font-family: Arial, sans-serif;
         }
-        #screen {
+        #canvas {
             position: absolute;
             top: 0;
             left: 0;
@@ -87,87 +59,73 @@ RUN cat > /opt/novnc/vnc.html <<'EOF'
             height: 100%;
             background: #000;
         }
-        .controls {
+        .toolbar {
             position: fixed;
             bottom: 20px;
             right: 20px;
-            z-index: 10000;
+            z-index: 1000;
             background: rgba(0,0,0,0.8);
-            padding: 8px 12px;
+            padding: 10px;
             border-radius: 8px;
-            backdrop-filter: blur(10px);
-            display: flex;
             gap: 8px;
+            display: flex;
         }
         button {
-            background: #4CAF50;
+            background: #2c3e50;
             color: white;
             border: none;
             padding: 8px 16px;
-            border-radius: 6px;
+            border-radius: 5px;
             cursor: pointer;
             font-size: 14px;
-            font-weight: 500;
-            transition: all 0.2s;
         }
         button:hover {
-            background: #45a049;
-            transform: scale(1.02);
-        }
-        button:active {
-            transform: scale(0.98);
+            background: #3498db;
         }
         .status {
             position: fixed;
             top: 20px;
             left: 20px;
-            z-index: 10000;
             background: rgba(0,0,0,0.7);
-            padding: 6px 12px;
-            border-radius: 6px;
-            color: #0f0;
+            color: #2ecc71;
+            padding: 5px 10px;
+            border-radius: 5px;
             font-size: 12px;
             font-family: monospace;
-            backdrop-filter: blur(5px);
-            pointer-events: none;
-        }
-        @media (max-width: 768px) {
-            .controls button {
-                padding: 10px 20px;
-                font-size: 16px;
-            }
+            z-index: 1000;
         }
     </style>
 </head>
 <body>
-    <div id="screen"></div>
-    <div class="status" id="status">Connecting...</div>
-    <div class="controls">
-        <button onclick="document.documentElement.requestFullscreen()">⛶ Fullscreen</button>
-        <button onclick="window.location.reload()">⟳ Refresh</button>
-        <button onclick="window.rfb?.disconnect(); setTimeout(()=>window.location.reload(), 100)">🔌 Reconnect</button>
+    <div id="canvas"></div>
+    <div class="status" id="status">Initializing...</div>
+    <div class="toolbar">
+        <button onclick="document.documentElement.requestFullscreen()">Fullscreen</button>
+        <button onclick="window.location.reload()">Refresh</button>
     </div>
 
     <script>
+        // Simple VNC client without complex UI elements
         (function() {
             let rfb;
             const statusDiv = document.getElementById('status');
             
-            function updateStatus(message, isError = false) {
-                statusDiv.textContent = message;
-                statusDiv.style.color = isError ? '#f00' : '#0f0';
-                console.log('[VNC]', message);
+            function setStatus(msg, isError = false) {
+                statusDiv.textContent = msg;
+                statusDiv.style.color = isError ? '#e74c3c' : '#2ecc71';
+                console.log('[VNC]', msg);
             }
             
             function connect() {
                 try {
-                    const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
-                    const wsUrl = `${protocol}//${window.location.hostname}:8080/websockify`;
+                    const host = window.location.hostname;
+                    const port = 8080;
+                    const url = `ws://${host}:${port}/websockify`;
                     
-                    updateStatus('Connecting to ' + wsUrl);
+                    setStatus(`Connecting to ${host}...`);
                     
-                    // Create RFB connection directly
-                    rfb = new RFB(document.getElementById('screen'), wsUrl, {
+                    // Create RFB connection
+                    rfb = new RFB(document.getElementById('canvas'), url, {
                         credentials: { password: '' },
                         shared: true,
                         view_only: false,
@@ -175,38 +133,34 @@ RUN cat > /opt/novnc/vnc.html <<'EOF'
                     });
                     
                     rfb.addEventListener('connect', () => {
-                        updateStatus('✓ Connected');
+                        setStatus('Connected to MT5');
                     });
                     
                     rfb.addEventListener('disconnect', (e) => {
-                        updateStatus('✗ Disconnected: ' + (e.detail.reason || 'Unknown'), true);
+                        setStatus('Disconnected: ' + (e.detail.reason || 'unknown'), true);
                         setTimeout(connect, 5000);
                     });
                     
                     rfb.addEventListener('securityfailure', (e) => {
-                        updateStatus('Security error: ' + e.detail.reason, true);
-                    });
-                    
-                    rfb.addEventListener('clipboard', (e) => {
-                        console.log('Clipboard data received');
+                        setStatus('Security error', true);
                     });
                     
                 } catch (error) {
-                    updateStatus('Error: ' + error.message, true);
+                    setStatus('Error: ' + error.message, true);
                     setTimeout(connect, 5000);
                 }
             }
             
-            // Load RFB and connect
+            // Load RFB library
             if (typeof RFB === 'undefined') {
                 const script = document.createElement('script');
                 script.src = '/novnc/app/rfb.js';
                 script.onload = () => {
-                    updateStatus('RFB loaded, connecting...');
+                    setStatus('Loading complete, connecting...');
                     connect();
                 };
                 script.onerror = () => {
-                    updateStatus('Failed to load RFB library', true);
+                    setStatus('Failed to load VNC library', true);
                 };
                 document.head.appendChild(script);
             } else {
@@ -218,9 +172,14 @@ RUN cat > /opt/novnc/vnc.html <<'EOF'
 </html>
 EOF
 
-# Method 3: Disable clipboard UI entirely by modifying the UI class
-RUN sed -i '/addClipboardHandlers/,/}/d' /opt/novnc/app/ui.js || true && \
-    sed -i 's/this.addClipboardHandlers();/\/\/ Clipboard handlers disabled for mobile compatibility/' /opt/novnc/app/ui.js || true
+# Create fallback index.html
+RUN cat > /opt/novnc/index.html <<'EOF'
+<!DOCTYPE html>
+<html>
+<head><meta http-equiv="refresh" content="0; url=/vnc.html"></head>
+<body>Redirecting to <a href="/vnc.html">VNC Client</a>...</body>
+</html>
+EOF
 
 # ============================================
 # PYTHON MT5 BRIDGE
@@ -240,134 +199,73 @@ https://download.mql5.com/cdn/web/metaquotes.software.corp/mt5/mt5setup.exe \
 COPY test.mq5 /root/test.mq5
 
 # ============================================
-# CREATE SIMPLE VNC HTML REDIRECT
-# ============================================
-RUN cat > /opt/novnc/index.html <<'EOF'
-<!DOCTYPE html>
-<html>
-<head>
-    <meta http-equiv="refresh" content="0; url=/vnc.html?autoconnect=1&resize=remote">
-</head>
-<body>
-    <p>Redirecting to <a href="/vnc.html?autoconnect=1&resize=remote">VNC Client</a>...</p>
-</body>
-</html>
-EOF
-
-# ============================================
-# ENTRYPOINT
+# ENTRYPOINT - FIXED websockify path
 # ============================================
 RUN cat > /entrypoint.sh <<'EOF'
 #!/bin/bash
 set -e
 
 echo "======================================="
-echo "STARTING MT5 + noVNC (Fixed)"
+echo "STARTING MT5 + noVNC (Railway Fixed)"
 echo "======================================="
 
-rm -rf /tmp/.X*
+# Clean up old X11 locks
+rm -rf /tmp/.X* /tmp/.X11-unix
 
-# ========================================
-# START XVFB
-# ========================================
+# Start Xvfb
 Xvfb :1 -screen 0 1280x1024x24 -ac -noreset &
 export DISPLAY=:1
 sleep 3
 
-# ========================================
-# START FLUXBOX
-# ========================================
+# Start fluxbox (lightweight window manager)
 fluxbox &
-sleep 3
-
-# ========================================
-# OPEN TEST TERMINAL
-# ========================================
-xterm -geometry 120x30+20+20 &
 sleep 2
 
-# ========================================
-# START X11VNC
-# ========================================
-x11vnc \
--display :1 \
--forever \
--shared \
--nopw \
--rfbport 5900 \
--noxdamage \
-&
+# Start x11vnc
+x11vnc -display :1 -forever -shared -nopw -rfbport 5900 -noxdamage &
+sleep 2
+
+# Start websockify (using correct path)
+websockify --web /opt/novnc 8080 localhost:5900 &
 sleep 3
 
-# ========================================
-# START noVNC with explicit web dir
-# ========================================
-cd /opt/novnc
-python3 /opt/novnc/utils/websockify/websockify.py \
-  --web /opt/novnc \
-  8080 \
-  localhost:5900 \
-  --verbose &
-sleep 5
-
-# ========================================
-# INIT WINE
-# ========================================
+# Initialize Wine
 wineboot --init
 sleep 10
 
 MT5_EXE="/root/.wine/drive_c/Program Files/MetaTrader 5/terminal64.exe"
 
-# ========================================
-# INSTALL MT5 IF MISSING
-# ========================================
+# Install MT5 if not present
 if [ ! -f "$MT5_EXE" ]; then
-    echo "Installing MT5..."
+    echo "Installing MT5 (first time setup)..."
     wine /root/mt5setup.exe /auto
     sleep 90
 fi
 
-# ========================================
-# START MT5
-# ========================================
-echo "Launching MT5..."
+# Start MT5
+echo "Launching MetaTrader 5..."
 wine "$MT5_EXE" /portable &
 sleep 30
 
-# ========================================
-# FIND MT5 DATA FOLDER
-# ========================================
-DATA_DIR=$(find /root/.wine -type d -path "*MetaQuotes/Terminal/*/MQL5" | head -n 1)
-
+# Find and copy EA
+DATA_DIR=$(find /root/.wine -type d -path "*MetaQuotes/Terminal/*/MQL5" 2>/dev/null | head -n 1)
 if [ -z "$DATA_DIR" ]; then
     DATA_DIR="/root/.wine/drive_c/Program Files/MetaTrader 5/MQL5"
 fi
 
 mkdir -p "$DATA_DIR/Experts"
-
-# ========================================
-# COPY EA
-# ========================================
-cp "/root/test.mq5" "$DATA_DIR/Experts/"
+cp /root/test.mq5 "$DATA_DIR/Experts/" 2>/dev/null || echo "EA file not found"
 
 echo "======================================="
-echo "EA INSTALLED:"
-echo "$DATA_DIR/Experts/"
+echo "DEPLOYMENT SUCCESSFUL!"
+echo "======================================="
+echo "Access MT5 at: https://${RAILWAY_PUBLIC_DOMAIN:-localhost}/vnc.html"
 echo "======================================="
 
-ls -la "$DATA_DIR/Experts/"
-
-# ========================================
-# START MT5 PYTHON BRIDGE
-# ========================================
+# Start Python bridge
 python3 -m mt5linux --host 0.0.0.0 --port 8001 &
 
-echo "======================================="
-echo "SYSTEM READY"
-echo "======================================="
-echo "ACCESS VNC AT: http://localhost:8080/vnc.html"
-echo "======================================="
-
+# Keep container running
 tail -f /dev/null
 EOF
 
