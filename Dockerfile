@@ -1,3 +1,6 @@
+#latest chatgpt docker
+
+
 FROM python:3.11-slim-bookworm
 
 USER root
@@ -30,11 +33,21 @@ RUN git clone --depth 1 https://github.com/novnc/noVNC.git /opt/novnc && \
 # ============================================
 # FIX MOBILE addEventListener ERROR
 # ============================================
-RUN sed -i 's/clipboardButton.addEventListener/#clipboardButton.addEventListener/g' \
-/opt/novnc/app/ui.js || true
+# ============================================
+# FIX MOBILE addEventListener ERROR
+# ============================================
+RUN sed -i '/"use strict";/a \
+document.addEventListener("DOMContentLoaded", () => {\
+    ["noVNC_clipboard_button", "noVNC_clipboard_clear_button"].forEach(id => {\
+        if (!document.getElementById(id)) {\
+            const btn = document.createElement("button");\
+            btn.id = id;\
+            btn.style.display = "none";\
+            document.body.appendChild(btn);\
+        }\
+    });\
+});' /opt/novnc/app/ui.js
 
-RUN sed -i 's/clipboardClearButton.addEventListener/#clipboardClearButton.addEventListener/g' \
-/opt/novnc/app/ui.js || true
 
 # ============================================
 # PYTHON MT5 BRIDGE
