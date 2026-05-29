@@ -34,7 +34,7 @@ WORKDIR /app
 # ============================================
 # COPY EA (MUST BE .EX5 FOR REAL TRADING)
 # ============================================
-COPY test.ex5 /app/EA.ex5
+COPY test.mq5 /app/test.mq5
 
 # ============================================
 # INSTALL MT5 DURING BUILD
