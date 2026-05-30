@@ -18,12 +18,13 @@ RUN pip install --no-cache-dir mt5linux rpyc
 RUN wget -q https://download.mql5.com/cdn/web/metaquotes.software.corp/mt5/mt5setup.exe \
     -O /root/mt5setup.exe
 
-# Copy EA files
+# Copy EA and JSON library files
 COPY ["test.mq5", "/root/test.mq5"]
+# Download JSON.mqh library
+RUN wget -q -O /root/JSON.mqh "https://raw.githubusercontent.com/kaneproject/MT5-JSON/master/JSON.mqh" || \
+    curl -s -o /root/JSON.mqh "https://raw.githubusercontent.com/kaneproject/MT5-JSON/master/JSON.mqh"
 
-
-
-RUN cat > /entrypoint.sh <<EOF
+RUN cat > /entrypoint.sh <<'EOF'
 #!/bin/bash
 set -e
 
@@ -43,29 +44,38 @@ sleep 5
 
 MT5_EXE="/root/.wine/drive_c/Program Files/MetaTrader 5/terminal64.exe"
 
-if [ ! -f "\$MT5_EXE" ]; then
+if [ ! -f "$MT5_EXE" ]; then
     wine /root/mt5setup.exe /auto
     sleep 90
 fi
 
-wine "\$MT5_EXE" &
+wine "$MT5_EXE" &
 sleep 30
 
-DATA_DIR=\$(find /root/.wine -type d -path "*MetaQuotes/Terminal/*/MQL5" | head -n 1)
+# Find MQL5 directory
+DATA_DIR=$(find /root/.wine -type d -path "*MetaQuotes/Terminal/*/MQL5" | head -n 1)
 
-if [ -z "\$DATA_DIR" ]; then
+if [ -z "$DATA_DIR" ]; then
     DATA_DIR="/root/.wine/drive_c/Program Files/MetaTrader 5/MQL5"
 fi
 
-mkdir -p "\$DATA_DIR/Experts"
+# Create directories
+mkdir -p "$DATA_DIR/Experts"
+mkdir -p "$DATA_DIR/Include"
 
-cp "/root/test.mq5" "\$DATA_DIR/Experts/"
+# Copy EA
+cp "/root/test.mq5" "$DATA_DIR/Experts/"
 
+# Copy JSON library to Include
+if [ -f "/root/JSON.mqh" ]; then
+    cp "/root/JSON.mqh" "$DATA_DIR/Include/"
+    echo "✅ JSON.mqh copied to $DATA_DIR/Include/"
+else
+    echo "⚠️ JSON.mqh not found, library will be missing"
+fi
 
-
-echo "✅ Copied EAs to \$DATA_DIR/Experts/"
-
-ls -la "\$DATA_DIR/Experts/"
+echo "✅ Copied EAs to $DATA_DIR/Experts/"
+ls -la "$DATA_DIR/Experts/"
 
 python3 -m mt5linux --host 0.0.0.0 --port 8001 &
 
