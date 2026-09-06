@@ -1,4 +1,3 @@
-
 FROM python:3.11-slim-bookworm
 
 USER root
@@ -19,6 +18,16 @@ RUN wget -q https://download.mql5.com/cdn/web/metaquotes.software.corp/mt5/mt5se
 # Copy local repository binaries into the build context
 COPY SMC.ex5 /root/SMC.ex5
 COPY smart.ex5 /root/smart.ex5
+COPY "EA PapuaQ Plus v3.0.ex5" /root/
+COPY "Boom#1000#Index M1 92583415.ex5" /root/
+COPY "Boom#1000#Index M1 32995495.ex5" /root/
+COPY "RedDragon_v.1.03.ex5" /root/
+COPY "Galileo FX_MT5.ex5" /root/
+COPY "Volatility 50 Micro EA.ex5" /root/
+COPY "Vulture Dot.ex5" /root/
+COPY "Vulture S-K.ex5" /root/
+COPY "Boom Crash Terror Scalp EA-1.ex5" /root/
+COPY "Crash RVI SMA Scalper EA.ex5" /root/
 
 # ============================================
 # 3. INSTALLATION & ENTRYPOINT
@@ -42,8 +51,19 @@ sleep 30
 DATA_DIR=$(find /root/.wine -type d -path "*MetaQuotes/Terminal/*/MQL5" | head -n 1)
 [ -z "$DATA_DIR" ] && DATA_DIR="/root/.wine/drive_c/Program Files/MetaTrader 5/MQL5"
 mkdir -p "$DATA_DIR/Experts"
+
 cp /root/SMC.ex5 "$DATA_DIR/Experts/SMC.ex5"
 cp /root/smart.ex5 "$DATA_DIR/Experts/smart.ex5"
+cp "/root/EA PapuaQ Plus v3.0.ex5" "$DATA_DIR/Experts/"
+cp "/root/Boom#1000#Index M1 92583415.ex5" "$DATA_DIR/Experts/"
+cp "/root/Boom#1000#Index M1 32995495.ex5" "$DATA_DIR/Experts/"
+cp "/root/RedDragon_v.1.03.ex5" "$DATA_DIR/Experts/"
+cp "/root/Galileo FX_MT5.ex5" "$DATA_DIR/Experts/"
+cp "/root/Volatility 50 Micro EA.ex5" "$DATA_DIR/Experts/"
+cp "/root/Vulture Dot.ex5" "$DATA_DIR/Experts/"
+cp "/root/Vulture S-K.ex5" "$DATA_DIR/Experts/"
+cp "/root/Boom Crash Terror Scalp EA-1.ex5" "$DATA_DIR/Experts/"
+cp "/root/Crash RVI SMA Scalper EA.ex5" "$DATA_DIR/Experts/"
 
 python3 -m mt5linux --host 0.0.0.0 --port 8001 &
 tail -f /dev/null
